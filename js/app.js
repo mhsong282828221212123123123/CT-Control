@@ -703,13 +703,26 @@ class AppStateMachine {
       this.evaluateViewState();
     });
 
-    document.getElementById('btn-reset-key')?.addEventListener('click', async () => {
-      if (confirm('저장된 가상키와 등록 정보를 모두 초기화하시겠습니까?')) {
-        await cryptoStore.clearAll();
-        bleManager.disconnect();
-        this.evaluateViewState();
-      }
+    // 1-1. 키 초기화 커스텀 모달 바인딩 (Bluefy 기본 confirm 버그 방지)
+    const resetModal = document.getElementById('reset-confirm-modal');
+    document.getElementById('btn-reset-key')?.addEventListener('click', () => {
+      this.triggerHaptic(40);
+      resetModal?.classList.add('active');
     });
+
+    document.getElementById('btn-modal-cancel-reset')?.addEventListener('click', () => {
+      this.triggerHaptic(30);
+      resetModal?.classList.remove('active');
+    });
+
+    document.getElementById('btn-modal-confirm-reset')?.addEventListener('click', async () => {
+      this.triggerHaptic(60);
+      resetModal?.classList.remove('active');
+      await cryptoStore.clearAll();
+      bleManager.disconnect();
+      this.evaluateViewState();
+    });
+
 
     // 2. 미연결 화면 [차량 블루투스 연결하기] 대형 버튼
     document.getElementById('btn-hero-connect')?.addEventListener('click', async () => {
