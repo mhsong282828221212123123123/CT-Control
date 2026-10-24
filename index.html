@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>CT-Control | Tesla Virtual Key & Sub-Cluster</title>
+  <link rel="manifest" href="./manifest.json">
+  <meta name="theme-color" content="#0d0d0d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+  <!-- ==========================================
+       1. 상단 고정 상태 바 (Global Sticky Header)
+       ========================================== -->
+  <header class="sticky-header">
+    <div class="header-left">
+      <!-- 5초 롱프레스 시 시뮬레이션/데모 모달 트리거 -->
+      <div id="brand-logo" class="brand-logo" title="5초간 길게 누르면 데모 모드 활성화">
+        <span>TESLA</span>
+        <span class="brand-badge">CT</span>
+      </div>
+      <div id="connection-indicator" class="connection-indicator">
+        <span class="status-dot">🔴</span>
+        <span id="connection-text">차량 연결 끊김</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div id="badge-gear" class="mini-badge gear" style="display: none;">P</div>
+      <div id="badge-battery" class="mini-badge battery" style="display: none;">--%</div>
+    </div>
+  </header>
+
+  <!-- ==========================================
+       2. 메인 뷰포트 (State Machine Views)
+       ========================================== -->
+  <main class="app-viewport">
+
+    <!-- [뷰 1: 온보딩 차키 등록 위저드] -->
+    <section id="view-wizard" class="view-section">
+      <div class="wizard-card">
+        <h2 class="wizard-title">가상키 등록 마법사</h2>
+        <p class="wizard-subtitle">테슬라 차량에 안전하게 스마트폰 BLE 가상키를 등록합니다.</p>
+
+        <div class="step-indicator">
+          <div id="step-node-1" class="step-item active">
+            <div class="step-circle">1</div>
+            <span>키 생성</span>
+          </div>
+          <div id="step-node-2" class="step-item">
+            <div class="step-circle">2</div>
+            <span>BLE 페어링</span>
+          </div>
+          <div id="step-node-3" class="step-item">
+            <div class="step-circle">3</div>
+            <span>NFC 승인</span>
+          </div>
+        </div>
+
+        <!-- Step 1 Body -->
+        <div id="wizard-step-1" class="wizard-step-body">
+          <div style="font-size: 48px;">🔑</div>
+          <p>브라우저 보안 저장소에 전용 ECDSA P-256 키 쌍을 안전하게 생성하고 있습니다...</p>
+          <button id="btn-create-key" class="btn-primary" style="display: none;">키 다시 생성</button>
+        </div>
+
+        <!-- Step 2 Body -->
+        <div id="wizard-step-2" class="wizard-step-body" style="display: none;">
+          <div style="font-size: 48px;">📡</div>
+          <p>차량 블루투스(BLE)를 탐색하고 키 등록 요청(AddKey)을 전송합니다.</p>
+          <button id="btn-request-pairing" class="btn-primary" style="width: 100%; min-height: 56px;">
+            차량 블루투스 탐색 및 키 등록 요청
+          </button>
+        </div>
+
+        <!-- Step 3 Body -->
+        <div id="wizard-step-3" class="wizard-step-body" style="display: none;">
+          <div class="nfc-animation-box">💳</div>
+          <p style="font-size: 15px; font-weight: 700; color: #fff;">
+            센터콘솔 컵홀더 뒤편에<br>실물 NFC 카드키를 태그하여 승인하세요.
+          </p>
+          <p style="font-size: 12px; color: var(--text-secondary);">
+            차량 화면의 키 등록 팝업을 확인하고 카드를 접촉하면 승인이 완료됩니다.
+          </p>
+          <button id="btn-confirm-registration" class="btn-primary" style="margin-top: 10px;">
+            등록 완료 확인
+          </button>
+        </div>
+
+        <!-- 하단 키 초기화 링크 -->
+        <div style="text-align: center; margin-top: 10px;">
+          <button id="btn-reset-key" class="btn-secondary" style="font-size: 11px; padding: 6px 12px; background: transparent; border: none; color: var(--text-muted);">
+            키 데이터 초기화 및 재시작
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- [뷰 2: 미연결 대기 화면] -->
+    <section id="view-disconnected" class="view-section">
+      <div class="disconnected-container">
+        <div class="disconnected-hero-icon">🚗</div>
+        <div>
+          <h2 style="font-size: 22px; font-weight: 800; margin-bottom: 8px;">차량에 연결되지 않음</h2>
+          <p style="font-size: 14px; color: var(--text-secondary);">
+            차량 근처에서 아래 버튼을 눌러 BLE 보안 세션을 연결하세요.
+          </p>
+        </div>
+        <button id="btn-hero-connect" class="hero-connect-btn">
+          <span>🔗 차량 블루투스 연결하기</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- [뷰 3: 충전 전용 화면 (Charging Mode)] -->
+    <section id="view-charging" class="view-section">
+      <div class="charging-container">
+        <div class="charging-hero-card">
+          <div style="font-size: 14px; font-weight: 700; color: var(--tesla-green); letter-spacing: 1px;">
+            ⚡ CHARGING IN PROGRESS
+          </div>
+          <div id="charge-soc-text" class="charge-soc-display">--%</div>
+          <div class="charge-progress-bar-bg">
+            <div id="charge-progress-bar-fill" class="charge-progress-bar-fill"></div>
+          </div>
+          <div style="display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary);">
+            <span>목표 한도: <strong id="charge-limit-text">80%</strong></span>
+            <span>남은 시간: <strong id="charge-remaining-time">--</strong></span>
+          </div>
+        </div>
+
+        <div class="charging-stats-grid">
+          <div class="stat-item">
+            <span class="stat-label">충전 전력</span>
+            <span id="charge-stat-power" class="stat-value">0.0 kW</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">충전 전압 / 전류</span>
+            <span id="charge-stat-va" class="stat-value">0 V / 0 A</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">주행 가능 거리</span>
+            <span id="charge-stat-range" class="stat-value">0 km</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">차량 온도</span>
+            <span id="charge-stat-temp" class="stat-value">-- °C</span>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;">
+          <button id="btn-stop-charge" class="btn-primary" style="background-color: var(--tesla-red); min-height: 54px;">
+            ⚡ 충전 중지 및 케이블 잠금 해제
+          </button>
+          <button id="btn-toggle-charging-view" class="btn-secondary">
+            일반 제어/표시 화면으로 임시 전환
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- [뷰 4: 일반/주행 화면] -->
+    <section id="view-main" class="view-section">
+
+      <!-- [4.1 표시 탭 내용] -->
+      <div id="tab-content-display" style="display: flex; flex-direction: column; gap: 14px;">
+        
+        <!-- 메인 클러스터 카드 -->
+        <div class="cluster-card card">
+          <div class="gear-selector">
+            <span class="gear-item" data-gear="P">P</span>
+            <span class="gear-item" data-gear="R">R</span>
+            <span class="gear-item" data-gear="N">N</span>
+            <span class="gear-item" data-gear="D">D</span>
+          </div>
+          <div class="cluster-speed-wrap">
+            <span id="cluster-speed-val" class="speed-value">0</span>
+            <span class="speed-unit">km/h</span>
+          </div>
+
+          <!-- 실시간 출력 / 회생제동 게이지 바 -->
+          <div class="power-gauge-container">
+            <div class="power-center-line"></div>
+            <div id="power-gauge-fill" class="power-bar-fill"></div>
+          </div>
+          <div style="display: flex; justify-content: space-between; width: 100%; max-width: 320px; font-size: 11px; color: var(--text-muted);">
+            <span>회생제동 (kW)</span>
+            <span id="power-numeric-val">0 kW</span>
+            <span>출력 (kW)</span>
+          </div>
+        </div>
+
+        <!-- 도어 & 트렁크 개폐 상태 카드 -->
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 14px; font-weight: 700;">도어 및 수납공간</span>
+            <span id="doors-summary-badge" class="mini-badge" style="color: var(--tesla-green);">전체 닫힘 🟢</span>
+          </div>
+          <div class="doors-grid">
+            <div id="door-pill-df" class="door-status-pill"><span>운전석(DF)</span><strong>닫힘</strong></div>
+            <div id="door-pill-pf" class="door-status-pill"><span>조수석(PF)</span><strong>닫힘</strong></div>
+            <div id="door-pill-dr" class="door-status-pill"><span>운후(DR)</span><strong>닫힘</strong></div>
+            <div id="door-pill-pr" class="door-status-pill"><span>조후(PR)</span><strong>닫힘</strong></div>
+            <div id="door-pill-ft" class="door-status-pill"><span>프렁크(FT)</span><strong>닫힘</strong></div>
+            <div id="door-pill-rt" class="door-status-pill"><span>트렁크(RT)</span><strong>닫힘</strong></div>
+          </div>
+        </div>
+
+        <!-- 타이어 공기압 (TPMS) 카드 -->
+        <div class="card">
+          <span style="font-size: 14px; font-weight: 700;">타이어 공기압 (TPMS)</span>
+          <div class="tpms-grid">
+            <div class="tpms-item"><span>전방 좌측 (FL)</span><div id="tpms-fl" class="tpms-val">2.9 Bar</div></div>
+            <div class="tpms-item"><span>전방 우측 (FR)</span><div id="tpms-fr" class="tpms-val">2.9 Bar</div></div>
+            <div class="tpms-item"><span>후방 좌측 (RL)</span><div id="tpms-rl" class="tpms-val">2.9 Bar</div></div>
+            <div class="tpms-item"><span>후방 우측 (RR)</span><div id="tpms-rr" class="tpms-val">2.9 Bar</div></div>
+          </div>
+        </div>
+
+        <!-- 환경 & 배터리 요약 카드 -->
+        <div class="card">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <div>
+              <div style="font-size: 12px; color: var(--text-secondary);">실내 / 실외 온도</div>
+              <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">
+                <span id="temp-in">21.5</span>°C / <span id="temp-out">18.0</span>°C
+              </div>
+            </div>
+            <div>
+              <div style="font-size: 12px; color: var(--text-secondary);">배터리 / 주행거리</div>
+              <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">
+                <span id="cluster-battery-pct">--%</span> (<span id="cluster-range-km">-- km</span>)
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- [4.2 제어 탭 내용] -->
+      <div id="tab-content-control" style="display: none; flex-direction: column; gap: 14px;">
+        
+        <!-- 급감속 비상등 자동 점멸 옵션 바 -->
+        <div class="control-options-bar">
+          <span class="switch-label">
+            <span>⚡ 급감속 시 비상등 자동 점멸</span>
+          </span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="switch-auto-hazard" checked>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <!-- 상단 메인 와이드 타일 버튼: 비상등 -->
+        <button id="btn-hazard-flash" class="wide-tile-btn">
+          <span>🚨 비상등 점멸 (땡큐 비상등)</span>
+        </button>
+
+        <!-- 도어 안전 잠금 및 강제 잠금 해제 바 -->
+        <div class="door-safety-bar">
+          <span id="safety-status-msg">🔒 주행 중(D/R/N) 도어 개방 잠금</span>
+          <label class="override-checkbox-label">
+            <input type="checkbox" id="chk-force-unlock">
+            <span>강제 잠금 해제</span>
+          </label>
+        </div>
+
+        <!-- 하단 2x2 도어 래치 개방 그리드 -->
+        <div class="door-unlatch-grid">
+          <button id="btn-unlatch-fl" class="door-tile-btn" data-door="0">
+            <span class="icon">🚪</span>
+            <span>운전석 문 개방</span>
+          </button>
+          <button id="btn-unlatch-fr" class="door-tile-btn" data-door="1">
+            <span class="icon">🚪</span>
+            <span>조수석 문 개방</span>
+          </button>
+          <button id="btn-unlatch-rl" class="door-tile-btn" data-door="2">
+            <span class="icon">🚪</span>
+            <span>운전석 후방 문 개방</span>
+          </button>
+          <button id="btn-unlatch-rr" class="door-tile-btn" data-door="3">
+            <span class="icon">🚪</span>
+            <span>조수석 후방 문 개방</span>
+          </button>
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- ==========================================
+       3. 하단 고정 탭 바 (일반 화면 전용)
+       ========================================== -->
+  <nav id="bottom-nav-bar" class="bottom-nav" style="display: none;">
+    <button id="tab-btn-display" class="nav-tab-btn active">
+      <span class="tab-icon">📊</span>
+      <span>표시</span>
+    </button>
+    <button id="tab-btn-control" class="nav-tab-btn">
+      <span class="tab-icon">🕹️</span>
+      <span>제어</span>
+    </button>
+  </nav>
+
+  <!-- ==========================================
+       4. [🛠️ 시뮬레이션/데모 모달]
+       ========================================== -->
+  <div id="demo-modal" class="demo-modal-overlay">
+    <div class="demo-modal-box">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h3 style="font-size: 17px; font-weight: 700;">🛠️ 시뮬레이션 / 데모 모드</h3>
+        <button id="btn-close-demo" class="btn-secondary" style="padding: 4px 10px; font-size: 12px;">닫기</button>
+      </div>
+      <p style="font-size: 13px; color: var(--text-secondary);">
+        실제 테슬라 차량이 없는 환경에서도 PWA의 전체 상태 전환과 로직을 검증할 수 있습니다.
+      </p>
+
+      <div class="demo-actions-grid">
+        <button id="btn-sim-driving" class="btn-secondary">🚗 일반 주행 (60km/h)</button>
+        <button id="btn-sim-hard-brake" class="btn-secondary" style="border-color: var(--tesla-red);">🚨 급감속 발동 (60→10)</button>
+        <button id="btn-sim-charging" class="btn-secondary">⚡ 충전 모드 전환</button>
+        <button id="btn-sim-disconnect" class="btn-secondary">🔴 미연결 상태</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>

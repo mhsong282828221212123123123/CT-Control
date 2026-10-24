@@ -1,0 +1,23 @@
+{
+  "name": "CT-Control (Tesla BLE Key & Cluster)",
+  "short_name": "CT-Control",
+  "description": "Tesla BLE Virtual Key Controller & Sub-Cluster PWA",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#050505",
+  "theme_color": "#0d0d0d",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' fill='%23111111'/><path d='M96 40 L150 70 L96 90 L42 70 Z' fill='%23e82127'/><rect x='60' y='100' width='72' height='52' rx='8' fill='%23ffffff'/><circle cx='96' cy='126' r='12' fill='%23e82127'/></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' fill='%23111111'/><path d='M256 100 L400 180 L256 240 L112 180 Z' fill='%23e82127'/><rect x='160' y='270' width='192' height='140' rx='20' fill='%23ffffff'/><circle cx='256' cy='340' r='32' fill='%23e82127'/></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}
