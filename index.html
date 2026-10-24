@@ -3,18 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v6]</title>
-  <link rel="manifest" href="./manifest.json?v=6">
+  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v7]</title>
+  <link rel="manifest" href="./manifest.json?v=7">
   <meta name="theme-color" content="#0d0d0d">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <script>
-    // [v6 캐시 파쇄] Service Worker 등록 강제 해제 및 Web Cache 강제 소각
+    // [v7 캐시 파쇄] Service Worker 등록 강제 해제 및 Web Cache 강제 소각
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs) {
         for (var i = 0; i < regs.length; i++) {
           regs[i].unregister();
-          console.log('[v6] Unregistered old SW:', regs[i]);
+          console.log('[v7] Unregistered old SW:', regs[i]);
         }
       });
     }
@@ -24,7 +24,7 @@
       });
     }
   </script>
-  <link rel="stylesheet" href="./style.css?v=6">
+  <link rel="stylesheet" href="./style.css?v=7">
 </head>
 <body>
 
@@ -37,7 +37,7 @@
       <div id="brand-logo" class="brand-logo" title="5초간 길게 누르면 데모 모드 활성화">
         <span>TESLA</span>
         <span class="brand-badge">CT</span>
-        <span style="color:#00ffaa; font-weight:bold; margin-left:10px;">[BUILD v6]</span>
+        <span style="color:#00e5ff; font-weight:bold; margin-left:10px;">[BUILD v7]</span>
       </div>
       <div id="connection-indicator" class="connection-indicator">
         <span class="status-dot">🔴</span>
@@ -46,6 +46,9 @@
     </div>
 
     <div class="header-right">
+      <button id="btn-header-debug" class="header-debug-btn" title="실시간 BLE 디버그 로그 열기">
+        🐞 로그 <span id="header-log-count" class="header-log-badge">0</span>
+      </button>
       <div id="badge-gear" class="mini-badge gear" style="display: none;">P</div>
       <div id="badge-battery" class="mini-badge battery" style="display: none;">--%</div>
     </div>
@@ -94,6 +97,11 @@
           <button id="btn-request-pairing" class="btn-primary" style="width: 100%; min-height: 56px;">
             차량 블루투스 탐색 및 키 등록 요청
           </button>
+          <div style="text-align: center; margin-top: 10px;">
+            <button id="btn-open-debug-wizard" style="background: transparent; border: 1px dashed rgba(255,255,255,0.25); border-radius: 8px; color: var(--text-secondary); font-size: 12px; padding: 6px 12px; cursor: pointer;">
+              🐞 연결 안될 때 디버그 로그 확인
+            </button>
+          </div>
         </div>
 
         <!-- Step 3 Body -->
@@ -135,6 +143,11 @@
         <button id="btn-hero-connect" class="hero-connect-btn">
           <span>🔗 차량 블루투스 연결하기</span>
         </button>
+        <div style="text-align: center; margin-top: 10px;">
+          <button id="btn-open-debug-disconnected" style="background: transparent; border: 1px dashed rgba(255,255,255,0.25); border-radius: 8px; color: var(--text-secondary); font-size: 13px; padding: 7px 14px; cursor: pointer;">
+            🐞 실시간 BLE 연결 디버그 로그 보기
+          </button>
+        </div>
       </div>
     </section>
 
@@ -397,6 +410,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/app.js?v=6"></script>
+  <script type="module" src="./js/app.js?v=7"></script>
 </body>
 </html>

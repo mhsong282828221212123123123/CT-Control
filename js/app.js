@@ -4,8 +4,8 @@
  * Screen WakeLock, 급감속 감지 로직 및 세션 서명 연동
  */
 
-import { cryptoStore } from './crypto-store.js?v=6';
-import { bleManager } from './ble-manager.js?v=6';
+import { cryptoStore } from './crypto-store.js?v=7';
+import { bleManager } from './ble-manager.js?v=7';
 import {
   buildAddKeyRequest,
   buildOpenDoorAction,
@@ -15,7 +15,7 @@ import {
   buildChargePortUnlockAction,
   buildStatusRequest,
   bytesToHex
-} from './proto-codec.js?v=6';
+} from './proto-codec.js?v=7';
 
 // iOS Bluefy / Safari WebKit 안전 에러 메시지 추출 헬퍼 [v5]
 export function formatError(err) {
@@ -106,6 +106,10 @@ class AppStateMachine {
     if (badge) {
       badge.textContent = this.debugLogs.length;
     }
+    const headerBadge = document.getElementById('header-log-count');
+    if (headerBadge) {
+      headerBadge.textContent = this.debugLogs.length;
+    }
 
     // 시트 뷰어에 즉시 아이템 추가
     const listEl = document.getElementById('debug-log-list');
@@ -182,6 +186,8 @@ class AppStateMachine {
     this.debugLogs = [];
     const badge = document.getElementById('debug-log-badge');
     if (badge) badge.textContent = '0';
+    const headerBadge = document.getElementById('header-log-count');
+    if (headerBadge) headerBadge.textContent = '0';
     const listEl = document.getElementById('debug-log-list');
     if (listEl) listEl.innerHTML = '';
   }
@@ -207,7 +213,15 @@ class AppStateMachine {
       onMessage: (parsedData, raw) => this.handleIncomingTelemetry(parsedData, raw),
       onTx: (bytes, isPriority) => this.logPacket('TX', bytes, isPriority ? '[PRIORITY COMMAND]' : '[POLLING]'),
       onRx: (rawBytes, parsed) => this.logPacket('RX', rawBytes, parsed),
-      onLog: (msg, level) => this.logPacket(level === 'error' ? 'ERR' : (level === 'warn' ? 'WARN' : 'INFO'), null, msg)
+      onLog: (msg, level) => {
+        this.logPacket(level === 'error' ? 'ERR' : (level === 'warn' ? 'WARN' : 'INFO'), null, msg);
+        if (bleManager.connectionState === 'connecting') {
+          const connText = document.getElementById('connection-text');
+          if (connText) {
+            connText.textContent = msg.length > 25 ? msg.substring(0, 25) + '...' : msg;
+          }
+        }
+      }
     });
 
 
@@ -902,15 +916,27 @@ class AppStateMachine {
 
     // 8. 실시간 BLE 패킷 디버그 로그 시트 이벤트
     const debugBtn = document.getElementById('btn-toggle-debug');
+    const headerDebugBtn = document.getElementById('btn-header-debug');
+    const wizardDebugBtn = document.getElementById('btn-open-debug-wizard');
+    const disconnectedDebugBtn = document.getElementById('btn-open-debug-disconnected');
     const debugSheet = document.getElementById('debug-log-sheet');
     const closeDebugBtn = document.getElementById('btn-close-debug-sheet');
     const copyDebugBtn = document.getElementById('btn-copy-debug-logs');
     const clearDebugBtn = document.getElementById('btn-clear-debug-logs');
 
+    const openDebugSheet = () => {
+      this.triggerHaptic(40);
+      debugSheet?.classList.add('active');
+    };
+
     debugBtn?.addEventListener('click', () => {
       this.triggerHaptic(40);
       debugSheet?.classList.toggle('active');
     });
+
+    headerDebugBtn?.addEventListener('click', openDebugSheet);
+    wizardDebugBtn?.addEventListener('click', openDebugSheet);
+    disconnectedDebugBtn?.addEventListener('click', openDebugSheet);
 
     closeDebugBtn?.addEventListener('click', () => {
       debugSheet?.classList.remove('active');
