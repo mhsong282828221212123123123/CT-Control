@@ -9,7 +9,7 @@
  * - RX: 00000213-b2d1-43f0-9b88-960cebf8b91e (From VCSEC / Notify)
  */
 
-import { parseIncomingMessage } from './proto-codec.js?v=5';
+import { parseIncomingMessage } from './proto-codec.js?v=6';
 
 export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e';
 export const TESLA_TX_CHAR_UUID = '00000212-b2d1-43f0-9b88-960cebf8b91e'; // To VCSEC (Write)
@@ -39,29 +39,44 @@ class BLEManager {
     this.onMessageCallback = null;
     this.onTxCallback = null;
     this.onRxCallback = null;
+    this.onLogCallback = null;
 
     // 시뮬레이션 플래그
     this.isSimulation = false;
   }
 
-  setCallbacks({ onStateChange, onMessage, onTx, onRx }) {
+  setCallbacks({ onStateChange, onMessage, onTx, onRx, onLog }) {
     this.onStateChangeCallback = onStateChange;
     this.onMessageCallback = onMessage;
     this.onTxCallback = onTx;
     this.onRxCallback = onRx;
+    this.onLogCallback = onLog;
   }
 
+  log(message, level = 'info') {
+    const formatted = `[BLEManager] ${message}`;
+    if (level === 'warn') {
+      console.warn(formatted);
+    } else if (level === 'error') {
+      console.error(formatted);
+    } else {
+      console.log(formatted);
+    }
+    if (this.onLogCallback) {
+      this.onLogCallback(message, level);
+    }
+  }
 
   updateState(newState) {
     this.connectionState = newState;
-    console.log(`[BLEManager] State -> ${newState}`);
+    this.log(`State -> ${newState}`);
     if (this.onStateChangeCallback) {
       this.onStateChangeCallback(newState);
     }
   }
 
   /**
-   * Web Bluetooth 장치 검색 및 GATT 연결 시작 [v5 Bluefy 완벽 호환]
+   * Web Bluetooth 장치 검색 및 GATT 연결 시작 [v6: GATT 재시도 및 안드로이드 안정화]
    * acceptAllDevices 완전 배제, 표준 filters 배열 적용
    */
   async connect() {
@@ -79,7 +94,7 @@ class BLEManager {
 
     try {
       try {
-        // [v5 핵심] Bluefy가 지원하는 표준 filters 배열로 호출 (acceptAllDevices 배제)
+        // [v5/v6 핵심] Bluefy/Android 표준 filters 배열로 호출
         this.device = await navigator.bluetooth.requestDevice({
           filters: [
             { services: ['00000211-b2d1-43f0-9b88-960cebf8b91e'] },
@@ -88,7 +103,7 @@ class BLEManager {
           optionalServices: ['00000211-b2d1-43f0-9b88-960cebf8b91e']
         });
       } catch (primaryErr) {
-        console.warn('[BLEManager v5] Primary filters failed, trying fallback namePrefix filter...', primaryErr);
+        console.warn('[BLEManager] Primary filters failed, trying fallback namePrefix filter...', primaryErr);
         // 폴백 시도: acceptAllDevices를 쓰지 않고 namePrefix 필터만 적용
         this.device = await navigator.bluetooth.requestDevice({
           filters: [
@@ -98,19 +113,62 @@ class BLEManager {
         });
       }
 
+      const devName = this.device.name || '(이름 없는 기기)';
+      this.log(`스캔 완료, 연결 대상 장치 선택됨: ${devName} (${this.device.id})`);
+      if (devName.endsWith('C')) {
+        this.log(`[안내] 메인 컨트롤러(C) 노드가 식별되었습니다: ${devName}`);
+      } else {
+        this.log(`[참고] 선택된 기기명이 'C'로 끝나지 않습니다 (${devName}). 여러 기기가 검색될 경우 끝에 'C'가 붙은 노드가 메인 컨트롤러입니다.`);
+      }
+
+      // GATT 연결 끊김 핸들러 등록 (연결 완료 상태일 때만 cleanup 동작)
       this.device.addEventListener('gattserverdisconnected', () => {
-        console.warn('[BLEManager] GATT Server Disconnected!');
+        if (this.connectionState !== 'connected') {
+          return; // 재시도 루프 중의 disconnect() 호출은 무시
+        }
+        this.log('GATT 서버 연결이 해제되었습니다.', 'warn');
         this.cleanup();
         this.updateState('disconnected');
       });
 
-      console.log(`[BLEManager] Connecting to GATT Server (${this.device.name || this.device.id})...`);
-      this.server = await this.device.gatt.connect();
+      // 안드로이드 Web Bluetooth GATT Error 133 방어: 최대 4회 재시도 (600ms 간격)
+      const MAX_RETRIES = 4;
+      let connectedServer = null;
 
-      console.log('[BLEManager] Getting Tesla Primary Service...');
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          this.log(`Connecting to GATT Server (${this.device.name || this.device.id})... (시도 ${attempt}/${MAX_RETRIES})`);
+          connectedServer = await this.device.gatt.connect();
+          this.log(`GATT 서버 연결 성공! [${this.device.name || this.device.id}]`);
+          break;
+        } catch (gattErr) {
+          this.log(`GATT 연결 실패 (${attempt}/${MAX_RETRIES}): ${gattErr?.message || gattErr}`, 'warn');
+
+          // 세션 정리 (disconnect 호출)
+          try {
+            if (this.device.gatt) {
+              this.device.gatt.disconnect();
+            }
+          } catch (dcErr) {
+            console.warn('[BLEManager] gatt.disconnect() cleanup error:', dcErr);
+          }
+
+          if (attempt < MAX_RETRIES) {
+            this.log(`GATT 연결 재시도 (${attempt}/4)...`);
+            await new Promise((r) => setTimeout(r, 600));
+          } else {
+            this.log(`GATT 연결 최대 재시도(${MAX_RETRIES}회) 초과 실패: ${gattErr?.message || gattErr}`, 'error');
+            throw gattErr;
+          }
+        }
+      }
+
+      this.server = connectedServer;
+
+      this.log('Getting Tesla Primary Service...');
       this.service = await this.server.getPrimaryService(TESLA_SERVICE_UUID);
 
-      console.log('[BLEManager] Getting TX and RX Characteristics...');
+      this.log('Getting TX and RX Characteristics...');
       this.txChar = await this.service.getCharacteristic(TESLA_TX_CHAR_UUID);
       this.rxChar = await this.service.getCharacteristic(TESLA_RX_CHAR_UUID);
 
@@ -121,9 +179,10 @@ class BLEManager {
       });
 
       this.updateState('connected');
+      this.log(`차량 BLE 보안 세션 연결 완료: ${this.device.name}`);
       return true;
     } catch (error) {
-      console.error('[BLEManager] Connection error:', error);
+      this.log(`Connection error: ${error?.message || error}`, 'error');
       this.cleanup();
       this.updateState('disconnected');
       throw error;

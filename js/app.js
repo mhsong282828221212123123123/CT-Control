@@ -4,8 +4,8 @@
  * Screen WakeLock, 급감속 감지 로직 및 세션 서명 연동
  */
 
-import { cryptoStore } from './crypto-store.js?v=5';
-import { bleManager } from './ble-manager.js?v=5';
+import { cryptoStore } from './crypto-store.js?v=6';
+import { bleManager } from './ble-manager.js?v=6';
 import {
   buildAddKeyRequest,
   buildOpenDoorAction,
@@ -15,7 +15,7 @@ import {
   buildChargePortUnlockAction,
   buildStatusRequest,
   bytesToHex
-} from './proto-codec.js?v=5';
+} from './proto-codec.js?v=6';
 
 // iOS Bluefy / Safari WebKit 안전 에러 메시지 추출 헬퍼 [v5]
 export function formatError(err) {
@@ -126,9 +126,15 @@ class AppStateMachine {
         summaryText = parts.length > 0 ? parts.join(' | ') : JSON.stringify(parsedOrSummary);
       }
 
+      let tagLabel = 'ERR ⚠️';
+      if (direction === 'TX') tagLabel = 'TX 📤';
+      else if (direction === 'RX') tagLabel = 'RX 📥';
+      else if (direction === 'INFO') tagLabel = 'INFO ℹ️';
+      else if (direction === 'WARN') tagLabel = 'WARN ⚠️';
+
       itemEl.innerHTML = `
         <div class="debug-log-meta">
-          <div><span class="debug-log-tag ${tagClass}">${direction === 'TX' ? 'TX 📤' : (direction === 'RX' ? 'RX 📥' : 'ERR ⚠️')}</span> [${timeStr}] (${logEntry.bytesLength}B)</div>
+          <div><span class="debug-log-tag ${tagClass}">${tagLabel}</span> [${timeStr}] (${logEntry.bytesLength}B)</div>
           <div>${summaryText ? `<span>${summaryText}</span>` : ''}</div>
         </div>
         <div class="debug-hex-view">${hex || '(No bytes)'}</div>
@@ -195,12 +201,13 @@ class AppStateMachine {
     this.cachedPublicKeyRaw = cryptoStore.publicKeyRaw;
 
 
-    // 3. BLE 매니저 콜백 연동 (디버그 패킷 로깅 포함)
+    // 3. BLE 매니저 콜백 연동 (디버그 패킷 및 이벤트 로깅)
     bleManager.setCallbacks({
       onStateChange: (state) => this.handleBLEStateChange(state),
       onMessage: (parsedData, raw) => this.handleIncomingTelemetry(parsedData, raw),
       onTx: (bytes, isPriority) => this.logPacket('TX', bytes, isPriority ? '[PRIORITY COMMAND]' : '[POLLING]'),
-      onRx: (rawBytes, parsed) => this.logPacket('RX', rawBytes, parsed)
+      onRx: (rawBytes, parsed) => this.logPacket('RX', rawBytes, parsed),
+      onLog: (msg, level) => this.logPacket(level === 'error' ? 'ERR' : (level === 'warn' ? 'WARN' : 'INFO'), null, msg)
     });
 
 
@@ -218,14 +225,14 @@ class AppStateMachine {
   }
 
   /**
-   * PWA Service Worker 강제 해제 (v4 캐시 무효화)
+   * PWA Service Worker 강제 해제 (v6 캐시 무효화)
    */
   registerServiceWorker() {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then((regs) => {
         for (const reg of regs) {
           reg.unregister();
-          console.log('[v4] Unregistered SW:', reg.scope);
+          console.log('[v6] Unregistered SW:', reg.scope);
         }
       });
     }
@@ -712,7 +719,7 @@ class AppStateMachine {
         this.updateWizardStep();
       } catch (err) {
         console.error('[App] Pairing error:', err);
-        alert('BLE 스캔/연결 실패 [v5]: ' + formatError(err));
+        alert('BLE 스캔/연결 실패 [v6]: ' + formatError(err));
       }
     });
 
@@ -722,8 +729,57 @@ class AppStateMachine {
       this.evaluateViewState();
     });
 
-    // 1-1. 키 초기화 커스텀 모달 바인딩 (Bluefy 기본 confirm 버그 방지)
+    // 1-1. 키 초기화 & 캐시 강제 삭제 후 리로드 핸들러
     const resetModal = document.getElementById('reset-confirm-modal');
+    
+    const executePurgeAndRestart = async () => {
+      this.triggerHaptic(60);
+      resetModal?.classList.remove('active');
+      
+      try {
+        await cryptoStore.clearAll();
+      } catch (e) {
+        console.warn('[Purge] Crypto clear error:', e);
+      }
+
+      try {
+        bleManager.disconnect();
+      } catch (e) {
+        console.warn('[Purge] BLE disconnect error:', e);
+      }
+
+      // 캐시 스토리지 전체 삭제 (caches.keys())
+      if ('caches' in window) {
+        try {
+          const cacheKeys = await caches.keys();
+          await Promise.all(cacheKeys.map((k) => caches.delete(k)));
+          console.log('[Purge] All caches purged:', cacheKeys);
+        } catch (e) {
+          console.warn('[Purge] Cache delete error:', e);
+        }
+      }
+
+      // 서비스 워커 해제
+      if ('serviceWorker' in navigator) {
+        try {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map((r) => r.unregister()));
+          console.log('[Purge] Service workers unregistered');
+        } catch (e) {
+          console.warn('[Purge] SW unregister error:', e);
+        }
+      }
+
+      // location.reload(true) 실행 (캐시 무시 새로고침)
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set('t', Date.now().toString());
+        window.location.replace(url.toString());
+      } catch (_) {
+        window.location.reload(true);
+      }
+    };
+
     document.getElementById('btn-reset-key')?.addEventListener('click', () => {
       this.triggerHaptic(40);
       resetModal?.classList.add('active');
@@ -735,23 +791,19 @@ class AppStateMachine {
     });
 
     document.getElementById('btn-modal-confirm-reset')?.addEventListener('click', async () => {
-      this.triggerHaptic(60);
-      resetModal?.classList.remove('active');
-      await cryptoStore.clearAll();
-      bleManager.disconnect();
-      this.evaluateViewState();
+      await executePurgeAndRestart();
     });
 
 
     // 2. 미연결 화면 [차량 블루투스 연결하기] 대형 버튼
     document.getElementById('btn-hero-connect')?.addEventListener('click', async () => {
-      // [v5 핵심] iOS Bluefy User Gesture 보존: 첫 줄에서 바로 connect() 호출!
+      // [v6 핵심] iOS Bluefy/Android User Gesture 보존: 첫 줄에서 바로 connect() 호출!
       try {
         await bleManager.connect();
         this.triggerHaptic(80);
       } catch (err) {
         console.error('[App] Hero connect error:', err);
-        alert('BLE 스캔/연결 실패 [v5]: ' + formatError(err));
+        alert('BLE 스캔/연결 실패 [v6]: ' + formatError(err));
       }
     });
 

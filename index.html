@@ -3,18 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v5]</title>
-  <link rel="manifest" href="./manifest.json?v=5">
+  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v6]</title>
+  <link rel="manifest" href="./manifest.json?v=6">
   <meta name="theme-color" content="#0d0d0d">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <script>
-    // [v5 긴급 캐시 파쇄] 구버전 Service Worker 등록 강제 해제 및 IndexedDB 외 웹 캐시 전체 소각
+    // [v6 캐시 파쇄] Service Worker 등록 강제 해제 및 Web Cache 강제 소각
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs) {
         for (var i = 0; i < regs.length; i++) {
           regs[i].unregister();
-          console.log('[v5] Unregistered old SW:', regs[i]);
+          console.log('[v6] Unregistered old SW:', regs[i]);
         }
       });
     }
@@ -24,7 +24,7 @@
       });
     }
   </script>
-  <link rel="stylesheet" href="./style.css?v=5">
+  <link rel="stylesheet" href="./style.css?v=6">
 </head>
 <body>
 
@@ -37,7 +37,7 @@
       <div id="brand-logo" class="brand-logo" title="5초간 길게 누르면 데모 모드 활성화">
         <span>TESLA</span>
         <span class="brand-badge">CT</span>
-        <span style="color:#ffcc00; font-weight:bold; margin-left:10px;">[BUILD v5]</span>
+        <span style="color:#00ffaa; font-weight:bold; margin-left:10px;">[BUILD v6]</span>
       </div>
       <div id="connection-indicator" class="connection-indicator">
         <span class="status-dot">🔴</span>
@@ -88,6 +88,9 @@
         <div id="wizard-step-2" class="wizard-step-body" style="display: none;">
           <div style="font-size: 48px;">📡</div>
           <p>차량 블루투스(BLE)를 탐색하고 키 등록 요청(AddKey)을 전송합니다.</p>
+          <div style="background: rgba(255, 204, 0, 0.12); border: 1px solid rgba(255, 204, 0, 0.35); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; text-align: left; font-size: 12px; line-height: 1.5; color: #ffcc00;">
+            💡 <strong>기기 선택 팁:</strong> 여러 기기가 검색될 경우 끝에 <strong>'C'</strong>가 붙은 기기(예: S...<strong>C</strong>)가 차량의 <strong>메인 컨트롤러</strong>입니다. 끝에 'C'가 붙은 기기를 선택하세요.
+          </div>
           <button id="btn-request-pairing" class="btn-primary" style="width: 100%; min-height: 56px;">
             차량 블루투스 탐색 및 키 등록 요청
           </button>
@@ -124,6 +127,9 @@
           <h2 style="font-size: 22px; font-weight: 800; margin-bottom: 8px;">차량에 연결되지 않음</h2>
           <p style="font-size: 14px; color: var(--text-secondary);">
             차량 근처에서 아래 버튼을 눌러 BLE 보안 세션을 연결하세요.
+          </p>
+          <p style="font-size: 12px; color: #ffcc00; background: rgba(255, 204, 0, 0.1); border: 1px solid rgba(255, 204, 0, 0.25); border-radius: 6px; padding: 8px 10px; margin-top: 10px; text-align: left; line-height: 1.4;">
+            💡 여러 기기가 검색될 경우 기기명 끝에 <strong>'C'</strong>가 붙은 기기(메인 컨트롤러)를 선택하세요.
           </p>
         </div>
         <button id="btn-hero-connect" class="hero-connect-btn">
@@ -391,6 +397,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/app.js?v=5"></script>
+  <script type="module" src="./js/app.js?v=6"></script>
 </body>
 </html>
