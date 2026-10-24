@@ -9,15 +9,14 @@
  * - RX: 00000213-b2d1-43f0-9b88-960cebf8b91e (From VCSEC / Notify)
  */
 
-import { parseIncomingMessage } from './proto-codec.js';
+import { parseIncomingMessage } from './proto-codec.js?v=4';
 
 export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e';
-export const TESLA_16BIT_BASE_UUID = '00000211-0000-1000-8000-00805f9b34fb'; // 0x0211의 블루투스 SIG 표준 문자열 표현
 export const TESLA_TX_CHAR_UUID = '00000212-b2d1-43f0-9b88-960cebf8b91e'; // To VCSEC (Write)
 export const TESLA_RX_CHAR_UUID = '00000213-b2d1-43f0-9b88-960cebf8b91e'; // From VCSEC (Notify)
 
-
 export const CHUNK_SIZE = 240; // 안드로이드 BLE 안전 청크 바이트 크기
+
 
 class BLEManager {
   constructor() {
@@ -63,7 +62,7 @@ class BLEManager {
 
   /**
    * Web Bluetooth 장치 검색 및 GATT 연결 시작
-   * iOS Bluefy / Safari WebKit 호환: 정수 UUID 제거 및 이중 try-catch acceptAllDevices 폴백
+   * Bluefy User Gesture 보존을 위해 그 어떤 비동기 지연 없이 requestDevice 즉시 호출
    */
   async connect() {
     if (this.isSimulation) {
@@ -72,35 +71,22 @@ class BLEManager {
       return true;
     }
 
-    if (!navigator.bluetooth) {
-      throw new Error('이 브라우저는 Web Bluetooth API를 지원하지 않습니다. (iOS: Bluefy 브라우저, Android: Chrome)');
+    if (!navigator.bluetooth || typeof navigator.bluetooth.requestDevice !== 'function') {
+      throw new Error('이 브라우저는 Web Bluetooth를 지원하지 않습니다. (iOS: Bluefy 브라우저 설치 필요)');
     }
 
+    // 1. [핵심] User Gesture 보존: 첫 줄에서 동기적으로 requestDevice 호출!
+    // Bluefy는 optionalServices에 정수나 미지원 문자열이 있으면 즉시 undefined로 reject하므로
+    // 정제된 테슬라 단일 Service UUID만 전달
+    const requestPromise = navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: [TESLA_SERVICE_UUID]
+    });
+
+    this.updateState('connecting');
+
     try {
-      this.updateState('connecting');
-
-      const optionalServicesList = [TESLA_SERVICE_UUID, TESLA_16BIT_BASE_UUID];
-
-      console.log('[BLEManager] Requesting Bluetooth Device with Tesla string filters...');
-      
-      try {
-        // 1차 시도: Tesla 서비스 UUID 및 'S' 접두사 문자열 필터
-        this.device = await navigator.bluetooth.requestDevice({
-          filters: [
-            { services: [TESLA_SERVICE_UUID] },
-            { services: [TESLA_16BIT_BASE_UUID] },
-            { namePrefix: 'S' }
-          ],
-          optionalServices: optionalServicesList
-        });
-      } catch (filterErr) {
-        console.warn('[BLEManager] Primary filtered requestDevice failed, falling back to acceptAllDevices...', filterErr);
-        // 2차 폴백: Bluefy / iOS WebKit 호환용 acceptAllDevices 시도
-        this.device = await navigator.bluetooth.requestDevice({
-          acceptAllDevices: true,
-          optionalServices: optionalServicesList
-        });
-      }
+      this.device = await requestPromise;
 
       this.device.addEventListener('gattserverdisconnected', () => {
         console.warn('[BLEManager] GATT Server Disconnected!');
@@ -133,6 +119,7 @@ class BLEManager {
       throw error;
     }
   }
+
 
 
   /**

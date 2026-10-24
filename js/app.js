@@ -4,8 +4,8 @@
  * Screen WakeLock, 급감속 감지 로직 및 세션 서명 연동
  */
 
-import { cryptoStore } from './crypto-store.js';
-import { bleManager } from './ble-manager.js';
+import { cryptoStore } from './crypto-store.js?v=4';
+import { bleManager } from './ble-manager.js?v=4';
 import {
   buildAddKeyRequest,
   buildOpenDoorAction,
@@ -15,12 +15,14 @@ import {
   buildChargePortUnlockAction,
   buildStatusRequest,
   bytesToHex
-} from './proto-codec.js';
+} from './proto-codec.js?v=4';
 
-// iOS Bluefy / Safari WebKit 안전 에러 메시지 추출 헬퍼
+// iOS Bluefy / Safari WebKit 안전 에러 메시지 추출 헬퍼 [v4]
 export function formatError(err) {
-  if (!err) return '알 수 없는 오류';
+  if (err === undefined) return 'undefined (User Gesture 만료 또는 Bluefy 스캔 권한 미허용)';
+  if (err === null) return 'null (장치 선택 취소됨)';
   if (typeof err === 'string') return err;
+  if (err.name) return `${err.name}: ${err.message || ''}`;
   if (err.message) return err.message;
   try {
     const json = JSON.stringify(err);
@@ -28,6 +30,7 @@ export function formatError(err) {
   } catch (_) {}
   return String(err);
 }
+
 
 class AppStateMachine {
   constructor() {
@@ -69,7 +72,11 @@ class AppStateMachine {
     // 실시간 BLE 패킷 디버그 로그
     this.debugLogs = [];
     this.MAX_DEBUG_LOGS = 150;
+
+    // [v4 핵심] User Gesture 보존을 위한 사전 캐시 공개키
+    this.cachedPublicKeyRaw = null;
   }
+
 
   /**
    * 실시간 BLE 패킷 디버그 로그 추가 및 렌더링
@@ -184,6 +191,8 @@ class AppStateMachine {
 
     // 2. IndexedDB 및 키 저장소 초기화
     await cryptoStore.init();
+    this.cachedPublicKeyRaw = cryptoStore.publicKeyRaw;
+
 
     // 3. BLE 매니저 콜백 연동 (디버그 패킷 로깅 포함)
     bleManager.setCallbacks({
@@ -208,17 +217,19 @@ class AppStateMachine {
   }
 
   /**
-   * PWA Service Worker 등록
+   * PWA Service Worker 강제 해제 (v4 캐시 무효화)
    */
   registerServiceWorker() {
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js')
-          .then((reg) => console.log('[App] SW registered successfully:', reg.scope))
-          .catch((err) => console.warn('[App] SW registration failed:', err));
+      navigator.serviceWorker.getRegistrations().then((regs) => {
+        for (const reg of regs) {
+          reg.unregister();
+          console.log('[v4] Unregistered SW:', reg.scope);
+        }
       });
     }
   }
+
 
   /**
    * Screen Wake Lock API 설정 (iOS 등 미지원 브라우저 안전 처리)
@@ -384,7 +395,9 @@ class AppStateMachine {
       step3Body.style.display = 'none';
 
       await cryptoStore.generateKeyPair();
+      this.cachedPublicKeyRaw = cryptoStore.publicKeyRaw;
       setTimeout(() => this.updateWizardStep(), 500);
+
       return;
     }
 
@@ -686,14 +699,19 @@ class AppStateMachine {
     });
 
     document.getElementById('btn-request-pairing')?.addEventListener('click', async () => {
-      this.triggerHaptic(60);
+      // [v4 핵심] iOS Bluefy User Gesture 보존: 그 어떤 await도 없이 첫 줄에서 바로 connect() 호출!
       try {
         await bleManager.connect();
-        const addKeyPacket = buildAddKeyRequest(cryptoStore.publicKeyRaw);
+        this.triggerHaptic(60);
+
+        // 연결 완료 후 캐시된 공개키로 AddKeyRequest 전송
+        const pubKey = this.cachedPublicKeyRaw || cryptoStore.publicKeyRaw;
+        const addKeyPacket = buildAddKeyRequest(pubKey);
         await bleManager.sendPacket(addKeyPacket, true);
         this.updateWizardStep();
       } catch (err) {
-        alert('블루투스 연결에 실패했습니다: ' + formatError(err));
+        console.error('[App] Pairing error:', err);
+        alert('BLE 스캔/연결 실패 [v4]: ' + formatError(err));
       }
     });
 
@@ -726,13 +744,16 @@ class AppStateMachine {
 
     // 2. 미연결 화면 [차량 블루투스 연결하기] 대형 버튼
     document.getElementById('btn-hero-connect')?.addEventListener('click', async () => {
-      this.triggerHaptic(80);
+      // [v4 핵심] iOS Bluefy User Gesture 보존: 첫 줄에서 바로 connect() 호출!
       try {
         await bleManager.connect();
+        this.triggerHaptic(80);
       } catch (err) {
-        alert('블루투스 연결 실패: ' + formatError(err));
+        console.error('[App] Hero connect error:', err);
+        alert('BLE 스캔/연결 실패 [v4]: ' + formatError(err));
       }
     });
+
 
     // 3. 충전 전용 화면 이벤트
     document.getElementById('btn-stop-charge')?.addEventListener('click', async () => {
