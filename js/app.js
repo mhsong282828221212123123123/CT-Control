@@ -4,8 +4,8 @@
  * Screen WakeLock, 급감속 감지 로직 및 세션 서명 연동
  */
 
-import { cryptoStore } from './crypto-store.js?v=4';
-import { bleManager } from './ble-manager.js?v=4';
+import { cryptoStore } from './crypto-store.js?v=5';
+import { bleManager } from './ble-manager.js?v=5';
 import {
   buildAddKeyRequest,
   buildOpenDoorAction,
@@ -15,9 +15,9 @@ import {
   buildChargePortUnlockAction,
   buildStatusRequest,
   bytesToHex
-} from './proto-codec.js?v=4';
+} from './proto-codec.js?v=5';
 
-// iOS Bluefy / Safari WebKit 안전 에러 메시지 추출 헬퍼 [v4]
+// iOS Bluefy / Safari WebKit 안전 에러 메시지 추출 헬퍼 [v5]
 export function formatError(err) {
   if (err === undefined) return 'undefined (User Gesture 만료 또는 Bluefy 스캔 권한 미허용)';
   if (err === null) return 'null (장치 선택 취소됨)';
@@ -30,6 +30,7 @@ export function formatError(err) {
   } catch (_) {}
   return String(err);
 }
+
 
 
 class AppStateMachine {
@@ -699,7 +700,7 @@ class AppStateMachine {
     });
 
     document.getElementById('btn-request-pairing')?.addEventListener('click', async () => {
-      // [v4 핵심] iOS Bluefy User Gesture 보존: 그 어떤 await도 없이 첫 줄에서 바로 connect() 호출!
+      // [v5 핵심] iOS Bluefy User Gesture 보존: 그 어떤 await도 없이 첫 줄에서 바로 connect() 호출!
       try {
         await bleManager.connect();
         this.triggerHaptic(60);
@@ -711,7 +712,7 @@ class AppStateMachine {
         this.updateWizardStep();
       } catch (err) {
         console.error('[App] Pairing error:', err);
-        alert('BLE 스캔/연결 실패 [v4]: ' + formatError(err));
+        alert('BLE 스캔/연결 실패 [v5]: ' + formatError(err));
       }
     });
 
@@ -744,15 +745,16 @@ class AppStateMachine {
 
     // 2. 미연결 화면 [차량 블루투스 연결하기] 대형 버튼
     document.getElementById('btn-hero-connect')?.addEventListener('click', async () => {
-      // [v4 핵심] iOS Bluefy User Gesture 보존: 첫 줄에서 바로 connect() 호출!
+      // [v5 핵심] iOS Bluefy User Gesture 보존: 첫 줄에서 바로 connect() 호출!
       try {
         await bleManager.connect();
         this.triggerHaptic(80);
       } catch (err) {
         console.error('[App] Hero connect error:', err);
-        alert('BLE 스캔/연결 실패 [v4]: ' + formatError(err));
+        alert('BLE 스캔/연결 실패 [v5]: ' + formatError(err));
       }
     });
+
 
 
     // 3. 충전 전용 화면 이벤트

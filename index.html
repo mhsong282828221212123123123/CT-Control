@@ -3,18 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v4]</title>
-  <link rel="manifest" href="./manifest.json?v=4">
+  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v5]</title>
+  <link rel="manifest" href="./manifest.json?v=5">
   <meta name="theme-color" content="#0d0d0d">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <script>
-    // [v4 긴급 캐시 파쇄] 구버전 Service Worker 등록 강제 해제 및 IndexedDB 외 웹 캐시 전체 소각
+    // [v5 긴급 캐시 파쇄] 구버전 Service Worker 등록 강제 해제 및 IndexedDB 외 웹 캐시 전체 소각
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs) {
         for (var i = 0; i < regs.length; i++) {
           regs[i].unregister();
-          console.log('[v4] Unregistered old SW:', regs[i]);
+          console.log('[v5] Unregistered old SW:', regs[i]);
         }
       });
     }
@@ -24,7 +24,7 @@
       });
     }
   </script>
-  <link rel="stylesheet" href="./style.css?v=4">
+  <link rel="stylesheet" href="./style.css?v=5">
 </head>
 <body>
 
@@ -37,12 +37,14 @@
       <div id="brand-logo" class="brand-logo" title="5초간 길게 누르면 데모 모드 활성화">
         <span>TESLA</span>
         <span class="brand-badge">CT</span>
+        <span style="color:#ffcc00; font-weight:bold; margin-left:10px;">[BUILD v5]</span>
       </div>
       <div id="connection-indicator" class="connection-indicator">
         <span class="status-dot">🔴</span>
         <span id="connection-text">차량 연결 끊김</span>
       </div>
     </div>
+
     <div class="header-right">
       <div id="badge-gear" class="mini-badge gear" style="display: none;">P</div>
       <div id="badge-battery" class="mini-badge battery" style="display: none;">--%</div>
@@ -389,6 +391,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/app.js?v=4"></script>
+  <script type="module" src="./js/app.js?v=5"></script>
 </body>
 </html>
