@@ -10,10 +10,13 @@ import {
   buildAddKeyRequest,
   buildOpenDoorAction,
   buildFlashLightsAction,
+  buildCarServerFlashLightsAction,
   buildStopChargeAction,
   buildChargePortUnlockAction,
-  buildStatusRequest
+  buildStatusRequest,
+  bytesToHex
 } from './proto-codec.js';
+
 
 class AppStateMachine {
   constructor() {
@@ -51,7 +54,112 @@ class AppStateMachine {
 
     // 주기적 상태 폴링 타이머
     this.pollingTimer = null;
+
+    // 실시간 BLE 패킷 디버그 로그
+    this.debugLogs = [];
+    this.MAX_DEBUG_LOGS = 150;
   }
+
+  /**
+   * 실시간 BLE 패킷 디버그 로그 추가 및 렌더링
+   */
+  logPacket(direction, rawBytes, parsedOrSummary = null) {
+    const timestamp = new Date();
+    const timeStr = timestamp.toTimeString().split(' ')[0] + '.' + String(timestamp.getMilliseconds()).padStart(3, '0');
+    const hex = rawBytes ? bytesToHex(rawBytes) : '';
+
+    const logEntry = {
+      id: Date.now() + Math.random(),
+      timeStr,
+      direction, // 'TX' | 'RX' | 'ERR'
+      rawHex: hex,
+      bytesLength: rawBytes ? rawBytes.length : 0,
+      parsed: parsedOrSummary
+    };
+
+    this.debugLogs.push(logEntry);
+    if (this.debugLogs.length > this.MAX_DEBUG_LOGS) {
+      this.debugLogs.shift();
+    }
+
+    // 뱃지 업데이트
+    const badge = document.getElementById('debug-log-badge');
+    if (badge) {
+      badge.textContent = this.debugLogs.length;
+    }
+
+    // 시트 뷰어에 즉시 아이템 추가
+    const listEl = document.getElementById('debug-log-list');
+    if (listEl) {
+      const itemEl = document.createElement('div');
+      itemEl.className = `debug-log-item ${direction.toLowerCase()}`;
+      
+      const tagClass = direction.toLowerCase();
+      let summaryText = '';
+      if (typeof parsedOrSummary === 'string') {
+        summaryText = parsedOrSummary;
+      } else if (parsedOrSummary && typeof parsedOrSummary === 'object') {
+        const parts = [];
+        if (parsedOrSummary.whitelistOperationStatus) parts.push(`Whitelist: ${parsedOrSummary.whitelistOperationStatus}`);
+        if (parsedOrSummary.reportedCounter !== null && parsedOrSummary.reportedCounter !== undefined) parts.push(`Counter: ${parsedOrSummary.reportedCounter}`);
+        if (parsedOrSummary.speed !== undefined) parts.push(`Speed: ${parsedOrSummary.speed}km/h, Gear: ${parsedOrSummary.gear}`);
+        if (parsedOrSummary.charging_state && parsedOrSummary.charging_state !== 'Disconnected') parts.push(`Charge: ${parsedOrSummary.charging_state}`);
+        summaryText = parts.length > 0 ? parts.join(' | ') : JSON.stringify(parsedOrSummary);
+      }
+
+      itemEl.innerHTML = `
+        <div class="debug-log-meta">
+          <div><span class="debug-log-tag ${tagClass}">${direction === 'TX' ? 'TX 📤' : (direction === 'RX' ? 'RX 📥' : 'ERR ⚠️')}</span> [${timeStr}] (${logEntry.bytesLength}B)</div>
+          <div>${summaryText ? `<span>${summaryText}</span>` : ''}</div>
+        </div>
+        <div class="debug-hex-view">${hex || '(No bytes)'}</div>
+      `;
+      listEl.appendChild(itemEl);
+      listEl.scrollTop = listEl.scrollHeight;
+    }
+  }
+
+  /**
+   * 전체 디버그 로그 클립보드 복사
+   */
+  async copyDebugLogs() {
+    if (this.debugLogs.length === 0) {
+      alert('복사할 로그가 없습니다.');
+      return;
+    }
+
+    const logText = this.debugLogs.map(l => {
+      let str = `[${l.timeStr}] [${l.direction}] (${l.bytesLength} bytes)\nHEX: ${l.rawHex}\n`;
+      if (l.parsed) {
+        str += `PARSED: ${typeof l.parsed === 'object' ? JSON.stringify(l.parsed, null, 2) : l.parsed}\n`;
+      }
+      return str + '----------------------------------------';
+    }).join('\n');
+
+    try {
+      await navigator.clipboard.writeText(logText);
+      const copyBtn = document.getElementById('btn-copy-debug-logs');
+      if (copyBtn) {
+        const originalText = copyBtn.textContent;
+        copyBtn.textContent = '✅ 복사됨!';
+        setTimeout(() => copyBtn.textContent = originalText, 1500);
+      }
+    } catch (e) {
+      alert('클립보드 복사 실패: ' + e.message);
+    }
+  }
+
+  /**
+   * 디버그 로그 비우기
+   */
+  clearDebugLogs() {
+    this.debugLogs = [];
+    const badge = document.getElementById('debug-log-badge');
+    if (badge) badge.textContent = '0';
+    const listEl = document.getElementById('debug-log-list');
+    if (listEl) listEl.innerHTML = '';
+  }
+
 
   /**
    * 앱 부트스트랩 및 이벤트 바인딩
@@ -65,11 +173,14 @@ class AppStateMachine {
     // 2. IndexedDB 및 키 저장소 초기화
     await cryptoStore.init();
 
-    // 3. BLE 매니저 콜백 연동
+    // 3. BLE 매니저 콜백 연동 (디버그 패킷 로깅 포함)
     bleManager.setCallbacks({
       onStateChange: (state) => this.handleBLEStateChange(state),
-      onMessage: (parsedData, raw) => this.handleIncomingTelemetry(parsedData, raw)
+      onMessage: (parsedData, raw) => this.handleIncomingTelemetry(parsedData, raw),
+      onTx: (bytes, isPriority) => this.logPacket('TX', bytes, isPriority ? '[PRIORITY COMMAND]' : '[POLLING]'),
+      onRx: (rawBytes, parsed) => this.logPacket('RX', rawBytes, parsed)
     });
+
 
     // 4. UI 돔 요소 이벤트 바인딩
     this.bindDOMEvents();
@@ -685,9 +796,36 @@ class AppStateMachine {
       });
     });
 
-    // 8. 5초 롱프레스 데모 모드
+    // 8. 실시간 BLE 패킷 디버그 로그 시트 이벤트
+    const debugBtn = document.getElementById('btn-toggle-debug');
+    const debugSheet = document.getElementById('debug-log-sheet');
+    const closeDebugBtn = document.getElementById('btn-close-debug-sheet');
+    const copyDebugBtn = document.getElementById('btn-copy-debug-logs');
+    const clearDebugBtn = document.getElementById('btn-clear-debug-logs');
+
+    debugBtn?.addEventListener('click', () => {
+      this.triggerHaptic(40);
+      debugSheet?.classList.toggle('active');
+    });
+
+    closeDebugBtn?.addEventListener('click', () => {
+      debugSheet?.classList.remove('active');
+    });
+
+    copyDebugBtn?.addEventListener('click', () => {
+      this.triggerHaptic(40);
+      this.copyDebugLogs();
+    });
+
+    clearDebugBtn?.addEventListener('click', () => {
+      this.triggerHaptic(40);
+      this.clearDebugLogs();
+    });
+
+    // 9. 5초 롱프레스 데모 모드
     this.setupDemoModeTrigger();
   }
+
 
   setupDemoModeTrigger() {
     const logo = document.getElementById('brand-logo');

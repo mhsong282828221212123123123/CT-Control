@@ -780,3 +780,165 @@ input:checked + .toggle-slider:before {
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
+
+/* ==========================================
+   7. [🐞 BLE 패킷 디버그 로그 패널]
+   ========================================== */
+.floating-debug-btn {
+  position: fixed;
+  right: 16px;
+  bottom: 80px;
+  z-index: 95;
+  background-color: rgba(28, 28, 36, 0.92);
+  border: 1px solid var(--border-subtle);
+  border-radius: 24px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  transition: transform 0.15s, background 0.2s;
+}
+
+.floating-debug-btn:active {
+  transform: scale(0.95);
+  background-color: var(--bg-card-hover);
+}
+
+.floating-debug-btn .badge-count {
+  background-color: var(--tesla-red);
+  color: #fff;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+}
+
+/* 디버그 슬라이드업 시트 */
+.debug-sheet-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 1000;
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.debug-sheet-overlay.active {
+  display: flex;
+}
+
+.debug-sheet-box {
+  background-color: var(--bg-primary);
+  border-top: 1px solid var(--border-subtle);
+  border-top-left-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 680px;
+  height: 75vh;
+  display: flex;
+  flex-direction: column;
+  animation: slideUp 0.25s ease-out;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.debug-sheet-header {
+  padding: 14px 16px;
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  border-top-left-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.debug-sheet-title {
+  font-size: 15px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.debug-sheet-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.debug-log-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  background-color: #070709;
+}
+
+.debug-log-item {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.debug-log-item.tx {
+  border-left: 3px solid var(--tesla-blue);
+}
+
+.debug-log-item.rx {
+  border-left: 3px solid var(--tesla-green);
+}
+
+.debug-log-item.err {
+  border-left: 3px solid var(--tesla-red);
+}
+
+.debug-log-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.debug-log-tag {
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.debug-log-tag.tx { background-color: rgba(62, 128, 246, 0.2); color: var(--tesla-blue); }
+.debug-log-tag.rx { background-color: rgba(48, 209, 88, 0.2); color: var(--tesla-green); }
+.debug-log-tag.err { background-color: rgba(232, 33, 39, 0.2); color: var(--tesla-red); }
+
+.debug-hex-view {
+  word-break: break-all;
+  color: #a0aec0;
+  line-height: 1.4;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.debug-json-view {
+  color: #ff9f0a;
+  white-space: pre-wrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+

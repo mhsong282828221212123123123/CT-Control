@@ -102,6 +102,15 @@ export function concatBytes(...arrays) {
   return result;
 }
 
+// 바이트 배열 -> Hex 문자열 변환 유틸 (디버그 로그용)
+export function bytesToHex(uint8Array) {
+  if (!uint8Array || uint8Array.length === 0) return '';
+  return Array.from(uint8Array)
+    .map(b => b.toString(16).padStart(2, '0').toUpperCase())
+    .join(' ');
+}
+
+
 // Varint 디코딩 (offset부터 시작, { value, bytesRead } 반환)
 export function decodeVarint(buffer, offset = 0) {
   let result = 0;
@@ -266,13 +275,31 @@ export async function buildOpenDoorAction(doorIndex, cryptoStore) {
 
 /**
  * 비상등 점멸 (땡큐 비상등) 액션
- * RKEAction: tag 2 in UnsignedMessage, RKE_ACTION_WAKE_VEHICLE (30) 또는 RKEAction 플래시
+ * VCSEC 도메인: RKEAction_E (RKE_ACTION_WAKE_VEHICLE = 30) - 차량 기상 및 비상등 1~2회 점멸
+ * CarServer 도메인 호환: VehicleControlFlashLightsAction
  */
 export async function buildFlashLightsAction(cryptoStore) {
   // UnsignedMessage: tag 2 = RKEAction (RKE_ACTION_WAKE_VEHICLE = 30)
   const rkeActionField = encodeVarintField(2, RKE_ACTION_WAKE_VEHICLE);
   return await buildSignedVCSECMessage(rkeActionField, cryptoStore);
 }
+
+/**
+ * CarServer(Infotainment) 도메인 비상등 점멸 페이로드 빌더
+ * Action -> vehicleAction -> flashLightsAction
+ */
+export async function buildCarServerFlashLightsAction(cryptoStore) {
+  // VehicleControlFlashLightsAction (empty message or sub-fields)
+  const flashActionMsg = new Uint8Array(0);
+  // VehicleAction (tag 26 = flashLights)
+  const vehicleActionField = encodeLengthDelimitedField(26, flashActionMsg);
+  // Action (tag 2 = vehicleAction)
+  const actionField = encodeLengthDelimitedField(2, vehicleActionField);
+  
+  // VCSEC 래퍼 또는 서명 래핑
+  return await buildSignedVCSECMessage(actionField, cryptoStore);
+}
+
 
 /**
  * 충전 중지 및 포트 잠금 해제 액션

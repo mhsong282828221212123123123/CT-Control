@@ -329,6 +329,32 @@
     </div>
   </div>
 
+  <!-- ==========================================
+       5. [🐞 BLE 패킷 디버그 로그 플로팅 버튼 및 시트]
+       ========================================== -->
+  <button id="btn-toggle-debug" class="floating-debug-btn" title="BLE 패킷 송수신 로그 보기">
+    <span>🐞 로그</span>
+    <span id="debug-log-badge" class="badge-count">0</span>
+  </button>
+
+  <div id="debug-log-sheet" class="debug-sheet-overlay">
+    <div class="debug-sheet-box">
+      <div class="debug-sheet-header">
+        <div class="debug-sheet-title">
+          <span>🐞 BLE 패킷 실시간 디버그 로그</span>
+        </div>
+        <div class="debug-sheet-actions">
+          <button id="btn-copy-debug-logs" class="btn-secondary" style="font-size: 11px; padding: 5px 9px;">📋 전체 복사</button>
+          <button id="btn-clear-debug-logs" class="btn-secondary" style="font-size: 11px; padding: 5px 9px;">🧹 비우기</button>
+          <button id="btn-close-debug-sheet" class="btn-secondary" style="font-size: 11px; padding: 5px 9px;">✕ 닫기</button>
+        </div>
+      </div>
+      <div id="debug-log-list" class="debug-log-list">
+        <!-- 동적으로 추가되는 로그 엔트리 -->
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="./js/app.js"></script>
 </body>
 </html>

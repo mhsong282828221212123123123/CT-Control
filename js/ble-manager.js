@@ -37,15 +37,20 @@ class BLEManager {
     // 콜백
     this.onStateChangeCallback = null;
     this.onMessageCallback = null;
+    this.onTxCallback = null;
+    this.onRxCallback = null;
 
     // 시뮬레이션 플래그
     this.isSimulation = false;
   }
 
-  setCallbacks({ onStateChange, onMessage }) {
+  setCallbacks({ onStateChange, onMessage, onTx, onRx }) {
     this.onStateChangeCallback = onStateChange;
     this.onMessageCallback = onMessage;
+    this.onTxCallback = onTx;
+    this.onRxCallback = onRx;
   }
+
 
   updateState(newState) {
     this.connectionState = newState;
@@ -149,6 +154,9 @@ class BLEManager {
 
         // Protobuf 파싱 및 콜백 실행
         const parsed = parseIncomingMessage(fullPayload);
+        if (this.onRxCallback) {
+          this.onRxCallback(fullPayload, parsed);
+        }
         if (this.onMessageCallback) {
           this.onMessageCallback(parsed, fullPayload);
         }
@@ -163,6 +171,9 @@ class BLEManager {
    * 시뮬레이션용 수신 인젝터
    */
   injectSimulatedMessage(data) {
+    if (this.onRxCallback) {
+      this.onRxCallback(new Uint8Array([0x08, 0x01]), data);
+    }
     if (this.onMessageCallback) {
       this.onMessageCallback(data, new Uint8Array(0));
     }
@@ -172,10 +183,15 @@ class BLEManager {
    * 패킷 전송 요청 (2바이트 길이 헤더 프레이밍 + 우선순위 큐)
    */
   async sendPacket(protobufBytes, isPriority = false) {
+    if (this.onTxCallback) {
+      this.onTxCallback(protobufBytes, isPriority);
+    }
+
     if (this.isSimulation) {
       console.log(`[BLE SIM] Sent ${isPriority ? '[PRIORITY]' : '[NORMAL]'} payload length: ${protobufBytes.length}`);
       return true;
     }
+
 
     if (this.connectionState !== 'connected' || !this.txChar) {
       throw new Error('BLE 차량에 연결되어 있지 않습니다.');
