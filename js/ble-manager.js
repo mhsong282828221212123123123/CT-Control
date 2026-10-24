@@ -12,9 +12,10 @@
 import { parseIncomingMessage } from './proto-codec.js';
 
 export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e';
-export const TESLA_SHORT_SERVICE_UUID = 0x0211;
+export const TESLA_16BIT_BASE_UUID = '00000211-0000-1000-8000-00805f9b34fb'; // 0x0211의 블루투스 SIG 표준 문자열 표현
 export const TESLA_TX_CHAR_UUID = '00000212-b2d1-43f0-9b88-960cebf8b91e'; // To VCSEC (Write)
 export const TESLA_RX_CHAR_UUID = '00000213-b2d1-43f0-9b88-960cebf8b91e'; // From VCSEC (Notify)
+
 
 export const CHUNK_SIZE = 240; // 안드로이드 BLE 안전 청크 바이트 크기
 
@@ -62,7 +63,7 @@ class BLEManager {
 
   /**
    * Web Bluetooth 장치 검색 및 GATT 연결 시작
-   * 테슬라 BLE advertisement 스캔 누락 방지를 위한 다중 필터 및 Optional Services 등록
+   * iOS Bluefy / Safari WebKit 호환: 정수 UUID 제거 및 이중 try-catch acceptAllDevices 폴백
    */
   async connect() {
     if (this.isSimulation) {
@@ -72,26 +73,34 @@ class BLEManager {
     }
 
     if (!navigator.bluetooth) {
-      throw new Error('이 브라우저는 Web Bluetooth API를 지원하지 않습니다. Android Chrome을 사용하세요.');
+      throw new Error('이 브라우저는 Web Bluetooth API를 지원하지 않습니다. (iOS: Bluefy 브라우저, Android: Chrome)');
     }
 
     try {
       this.updateState('connecting');
 
-      console.log('[BLEManager] Requesting Bluetooth Device with Tesla filters...');
+      const optionalServicesList = [TESLA_SERVICE_UUID, TESLA_16BIT_BASE_UUID];
+
+      console.log('[BLEManager] Requesting Bluetooth Device with Tesla string filters...');
       
-      // 테슬라 차량 검색 누락 방지를 위한 정밀 필터 구성
-      this.device = await navigator.bluetooth.requestDevice({
-        filters: [
-          { services: [TESLA_SHORT_SERVICE_UUID] },
-          { services: [TESLA_SERVICE_UUID] },
-          { namePrefix: 'S' }
-        ],
-        optionalServices: [
-          TESLA_SERVICE_UUID,
-          TESLA_SHORT_SERVICE_UUID
-        ]
-      });
+      try {
+        // 1차 시도: Tesla 서비스 UUID 및 'S' 접두사 문자열 필터
+        this.device = await navigator.bluetooth.requestDevice({
+          filters: [
+            { services: [TESLA_SERVICE_UUID] },
+            { services: [TESLA_16BIT_BASE_UUID] },
+            { namePrefix: 'S' }
+          ],
+          optionalServices: optionalServicesList
+        });
+      } catch (filterErr) {
+        console.warn('[BLEManager] Primary filtered requestDevice failed, falling back to acceptAllDevices...', filterErr);
+        // 2차 폴백: Bluefy / iOS WebKit 호환용 acceptAllDevices 시도
+        this.device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: optionalServicesList
+        });
+      }
 
       this.device.addEventListener('gattserverdisconnected', () => {
         console.warn('[BLEManager] GATT Server Disconnected!');
@@ -124,6 +133,7 @@ class BLEManager {
       throw error;
     }
   }
+
 
   /**
    * 수신된 BLE 청크 조립 (2바이트 Big-Endian 길이 헤더)
@@ -255,16 +265,22 @@ class BLEManager {
     let offset = 0;
     while (offset < framed.length) {
       const chunk = framed.slice(offset, offset + CHUNK_SIZE);
-      if (this.txChar.writeValueWithoutResponse) {
-        await this.txChar.writeValueWithoutResponse(chunk);
-      } else {
+      // iOS Bluefy / 구형 WebKit 호환을 위한 writeValue 폴백
+      if (typeof this.txChar.writeValueWithResponse === 'function') {
         await this.txChar.writeValueWithResponse(chunk);
+      } else if (typeof this.txChar.writeValueWithoutResponse === 'function') {
+        await this.txChar.writeValueWithoutResponse(chunk);
+      } else if (typeof this.txChar.writeValue === 'function') {
+        await this.txChar.writeValue(chunk);
+      } else {
+        throw new Error('GATT 특성에 write 메서드가 존재하지 않습니다.');
       }
       offset += CHUNK_SIZE;
       if (offset < framed.length) {
         await new Promise(r => setTimeout(r, 15)); // 청크간 짧은 딜레이
       }
     }
+
   }
 
   /**

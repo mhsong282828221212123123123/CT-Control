@@ -17,6 +17,17 @@ import {
   bytesToHex
 } from './proto-codec.js';
 
+// iOS Bluefy / Safari WebKit 안전 에러 메시지 추출 헬퍼
+export function formatError(err) {
+  if (!err) return '알 수 없는 오류';
+  if (typeof err === 'string') return err;
+  if (err.message) return err.message;
+  try {
+    const json = JSON.stringify(err);
+    if (json && json !== '{}') return json;
+  } catch (_) {}
+  return String(err);
+}
 
 class AppStateMachine {
   constructor() {
@@ -145,8 +156,9 @@ class AppStateMachine {
         setTimeout(() => copyBtn.textContent = originalText, 1500);
       }
     } catch (e) {
-      alert('클립보드 복사 실패: ' + e.message);
+      alert('클립보드 복사 실패: ' + formatError(e));
     }
+
   }
 
   /**
@@ -209,18 +221,18 @@ class AppStateMachine {
   }
 
   /**
-   * Screen Wake Lock API 설정 (차량 연결 및 주행 중 화면 유지)
+   * Screen Wake Lock API 설정 (iOS 등 미지원 브라우저 안전 처리)
    */
   async requestWakeLock() {
-    if ('wakeLock' in navigator && !this.wakeLockSentinel) {
+    if (typeof navigator !== 'undefined' && 'wakeLock' in navigator && typeof navigator.wakeLock?.request === 'function' && !this.wakeLockSentinel) {
       try {
         this.wakeLockSentinel = await navigator.wakeLock.request('screen');
-        this.wakeLockSentinel.addEventListener('release', () => {
+        this.wakeLockSentinel?.addEventListener('release', () => {
           this.wakeLockSentinel = null;
         });
         console.log('[App] Screen Wake Lock acquired.');
       } catch (err) {
-        console.warn('[App] Wake Lock request error:', err);
+        console.warn('[App] Wake Lock request error:', formatError(err));
       }
     }
   }
@@ -232,7 +244,7 @@ class AppStateMachine {
         this.wakeLockSentinel = null;
         console.log('[App] Screen Wake Lock released.');
       } catch (err) {
-        console.warn('[App] Wake Lock release error:', err);
+        console.warn('[App] Wake Lock release error:', formatError(err));
       }
     }
   }
@@ -246,13 +258,16 @@ class AppStateMachine {
   }
 
   /**
-   * 햅틱 피드백 헬퍼 (Android 전용)
+   * 햅틱 피드백 헬퍼 (iOS 등 미지원 환경 방어)
    */
   triggerHaptic(duration = 80) {
-    if (navigator.vibrate) {
-      navigator.vibrate(duration);
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      try {
+        navigator.vibrate(duration);
+      } catch (_) {}
     }
   }
+
 
   /**
    * 상태 머신 뷰 전환 평가 (Core State Machine)
@@ -678,7 +693,7 @@ class AppStateMachine {
         await bleManager.sendPacket(addKeyPacket, true);
         this.updateWizardStep();
       } catch (err) {
-        alert('블루투스 연결에 실패했습니다: ' + err.message);
+        alert('블루투스 연결에 실패했습니다: ' + formatError(err));
       }
     });
 
@@ -702,7 +717,7 @@ class AppStateMachine {
       try {
         await bleManager.connect();
       } catch (err) {
-        alert('블루투스 연결 실패: ' + err.message);
+        alert('블루투스 연결 실패: ' + formatError(err));
       }
     });
 
@@ -717,9 +732,10 @@ class AppStateMachine {
         await bleManager.sendPacket(unlockPkt, true);
         alert('충전 중지 및 포트 잠금 해제 명령을 전송했습니다.');
       } catch (e) {
-        alert('명령 전송 실패: ' + e.message);
+        alert('명령 전송 실패: ' + formatError(e));
       }
     });
+
 
     document.getElementById('btn-toggle-charging-view')?.addEventListener('click', () => {
       this.triggerHaptic(40);

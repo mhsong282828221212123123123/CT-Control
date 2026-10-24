@@ -76,7 +76,7 @@ class CryptoStore {
   }
 
   /**
-   * 저장된 키 쌍 및 등록 상태 로드
+   * 저장된 키 쌍 및 등록 상태 로드 (iOS WebKit JWK 폴백 지원)
    */
   async loadStoredKey() {
     return new Promise((resolve, reject) => {
@@ -89,28 +89,60 @@ class CryptoStore {
       const req = store.get('primary_key');
 
       req.onsuccess = async () => {
-        const record = req.result;
-        if (record && record.publicKey && record.privateKey) {
-          this.keyPair = {
-            publicKey: record.publicKey,
-            privateKey: record.privateKey
-          };
-          this.publicKeyRaw = record.publicKeyRaw ? new Uint8Array(record.publicKeyRaw) : null;
-          this.isRegistered = !!record.isRegistered;
-          this.sessionCounter = record.sessionCounter || 0;
-
-          if (this.publicKeyRaw) {
-            this.keyId = await this.computeKeyId(this.publicKeyRaw);
+        try {
+          const record = req.result;
+          if (!record) {
+            this.keyPair = null;
+            this.publicKeyRaw = null;
+            this.keyId = null;
+            this.isRegistered = false;
+            this.sessionCounter = 0;
+            return resolve(false);
           }
 
-          console.log('[CryptoStore] Existing key loaded. Registered:', this.isRegistered, 'Counter:', this.sessionCounter);
-          resolve(true);
-        } else {
-          this.keyPair = null;
-          this.publicKeyRaw = null;
-          this.keyId = null;
-          this.isRegistered = false;
-          this.sessionCounter = 0;
+          const subtle = window.crypto?.subtle;
+          let pubKey = record.publicKey;
+          let privKey = record.privateKey;
+
+          // iOS WebKit에서 CryptoKey 객체가 깨져있거나 JWK로 보관된 경우 importKey 복원
+          if ((!pubKey || !privKey || !(pubKey instanceof CryptoKey)) && record.publicKeyJwk && record.privateKeyJwk && subtle) {
+            console.log('[CryptoStore] Restoring keys from JWK for iOS WebKit compatibility...');
+            pubKey = await subtle.importKey(
+              'jwk',
+              record.publicKeyJwk,
+              { name: 'ECDSA', namedCurve: 'P-256' },
+              true,
+              ['verify']
+            );
+            privKey = await subtle.importKey(
+              'jwk',
+              record.privateKeyJwk,
+              { name: 'ECDSA', namedCurve: 'P-256' },
+              true,
+              ['sign']
+            );
+          }
+
+          if (pubKey && privKey) {
+            this.keyPair = {
+              publicKey: pubKey,
+              privateKey: privKey
+            };
+            this.publicKeyRaw = record.publicKeyRaw ? new Uint8Array(record.publicKeyRaw) : null;
+            this.isRegistered = !!record.isRegistered;
+            this.sessionCounter = record.sessionCounter || 0;
+
+            if (this.publicKeyRaw) {
+              this.keyId = await this.computeKeyId(this.publicKeyRaw);
+            }
+
+            console.log('[CryptoStore] Existing key loaded. Registered:', this.isRegistered, 'Counter:', this.sessionCounter);
+            resolve(true);
+          } else {
+            resolve(false);
+          }
+        } catch (loadErr) {
+          console.warn('[CryptoStore] Key parsing error, resetting key:', loadErr);
           resolve(false);
         }
       };
@@ -121,17 +153,21 @@ class CryptoStore {
 
   /**
    * ECDSA P-256 키 쌍 생성 및 65바이트 Uncompressed Public Key 추출
+   * iOS WebKit 버그 방지: extractable=true 및 JWK 이중 보관
    */
   async generateKeyPair() {
-    const subtle = window.crypto.subtle;
+    const subtle = window.crypto?.subtle;
+    if (!subtle) {
+      throw new Error('이 브라우저는 Web Crypto API를 지원하지 않습니다.');
+    }
     
-    // ECDSA P-256 키 쌍 생성 (서명용)
+    // iOS WebKit의 IndexedDB CryptoKey 저장 버그 방지를 위해 extractable: true 로 생성
     const keyPair = await subtle.generateKey(
       {
         name: 'ECDSA',
         namedCurve: 'P-256'
       },
-      false, // non-extractable private key for security
+      true, // extractable: true (iOS WebKit JWK 직렬화 및 IndexedDB 보관 필수)
       ['sign', 'verify']
     );
 
@@ -140,23 +176,40 @@ class CryptoStore {
     const publicKeyRaw = new Uint8Array(rawPublicKeyBuffer);
     const keyId = await this.computeKeyId(publicKeyRaw);
 
+    // JWK 포맷 내보내기 (iOS WebKit 안전 저장용)
+    const publicKeyJwk = await subtle.exportKey('jwk', keyPair.publicKey);
+    const privateKeyJwk = await subtle.exportKey('jwk', keyPair.privateKey);
+
     this.keyPair = keyPair;
     this.publicKeyRaw = publicKeyRaw;
     this.keyId = keyId;
     this.isRegistered = false;
     this.sessionCounter = 1;
 
-    // IndexedDB에 저장
-    await this.saveRecord({
+    // IndexedDB에 저장 (CryptoKey 직접 저장 실패 시 JWK로 저장되도록 대비)
+    const record = {
       id: 'primary_key',
-      publicKey: keyPair.publicKey,
-      privateKey: keyPair.privateKey,
       publicKeyRaw: Array.from(publicKeyRaw),
+      publicKeyJwk,
+      privateKeyJwk,
       keyId: Array.from(keyId),
       isRegistered: false,
       createdAt: Date.now(),
       sessionCounter: 1
-    });
+    };
+
+    try {
+      // 1차 시도: CryptoKey 객체 및 JWK 동시 보관
+      await this.saveRecord({
+        ...record,
+        publicKey: keyPair.publicKey,
+        privateKey: keyPair.privateKey
+      });
+    } catch (saveErr) {
+      console.warn('[CryptoStore] Failed to save raw CryptoKey in IndexedDB (iOS WebKit DataCloneError), saving JWK only...', saveErr);
+      // 2차 폴백: JWK만 저장
+      await this.saveRecord(record);
+    }
 
     console.log('[CryptoStore] Generated new ECDSA P-256 key pair, raw length:', publicKeyRaw.length);
     return {
@@ -165,6 +218,7 @@ class CryptoStore {
       keyId
     };
   }
+
 
   /**
    * ECDSA P-256 서명 생성 (SHA-256, IEEE P1363 64-byte r||s 포맷)
