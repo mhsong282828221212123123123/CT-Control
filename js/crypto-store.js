@@ -1,6 +1,7 @@
 /**
  * crypto-store.js
- * Web Crypto API (ECDSA P-256) 키 관리 및 IndexedDB 영구 저장소
+ * Web Crypto API (ECDSA P-256) 키 관리, SHA-1 KeyId 계산,
+ * ECDSA P-256 서명 생성 및 IndexedDB 영구 저장소
  */
 
 const DB_NAME = 'TeslaBLEKeyDB';
@@ -11,8 +12,10 @@ class CryptoStore {
   constructor() {
     this.db = null;
     this.keyPair = null;
-    this.publicKeyRaw = null;
+    this.publicKeyRaw = null; // 65-byte uncompressed point
+    this.keyId = null;        // 4-byte Key Identifier (SHA-1 prefix)
     this.isRegistered = false;
+    this.sessionCounter = 0;
   }
 
   /**
@@ -65,6 +68,14 @@ class CryptoStore {
   }
 
   /**
+   * 공개키로부터 테슬라 표준 4바이트 KeyIdentifier (SHA-1 앞 4바이트) 계산
+   */
+  async computeKeyId(publicKeyBytes) {
+    const hashBuffer = await window.crypto.subtle.digest('SHA-1', publicKeyBytes);
+    return new Uint8Array(hashBuffer).slice(0, 4);
+  }
+
+  /**
    * 저장된 키 쌍 및 등록 상태 로드
    */
   async loadStoredKey() {
@@ -86,12 +97,20 @@ class CryptoStore {
           };
           this.publicKeyRaw = record.publicKeyRaw ? new Uint8Array(record.publicKeyRaw) : null;
           this.isRegistered = !!record.isRegistered;
-          console.log('[CryptoStore] Existing key loaded. Registered:', this.isRegistered);
+          this.sessionCounter = record.sessionCounter || 0;
+
+          if (this.publicKeyRaw) {
+            this.keyId = await this.computeKeyId(this.publicKeyRaw);
+          }
+
+          console.log('[CryptoStore] Existing key loaded. Registered:', this.isRegistered, 'Counter:', this.sessionCounter);
           resolve(true);
         } else {
           this.keyPair = null;
           this.publicKeyRaw = null;
+          this.keyId = null;
           this.isRegistered = false;
+          this.sessionCounter = 0;
           resolve(false);
         }
       };
@@ -119,10 +138,13 @@ class CryptoStore {
     // 공개키를 raw (Uncompressed Point format: 0x04 + X 32B + Y 32B = 65B)로 내보내기
     const rawPublicKeyBuffer = await subtle.exportKey('raw', keyPair.publicKey);
     const publicKeyRaw = new Uint8Array(rawPublicKeyBuffer);
+    const keyId = await this.computeKeyId(publicKeyRaw);
 
     this.keyPair = keyPair;
     this.publicKeyRaw = publicKeyRaw;
+    this.keyId = keyId;
     this.isRegistered = false;
+    this.sessionCounter = 1;
 
     // IndexedDB에 저장
     await this.saveRecord({
@@ -130,16 +152,40 @@ class CryptoStore {
       publicKey: keyPair.publicKey,
       privateKey: keyPair.privateKey,
       publicKeyRaw: Array.from(publicKeyRaw),
+      keyId: Array.from(keyId),
       isRegistered: false,
       createdAt: Date.now(),
-      sessionCounter: 0
+      sessionCounter: 1
     });
 
     console.log('[CryptoStore] Generated new ECDSA P-256 key pair, raw length:', publicKeyRaw.length);
     return {
       keyPair,
-      publicKeyRaw
+      publicKeyRaw,
+      keyId
     };
+  }
+
+  /**
+   * ECDSA P-256 서명 생성 (SHA-256, IEEE P1363 64-byte r||s 포맷)
+   */
+  async signPayload(payloadBytes) {
+    if (!this.keyPair || !this.keyPair.privateKey) {
+      throw new Error('서명용 개인키가 존재하지 않습니다.');
+    }
+
+    const subtle = window.crypto.subtle;
+    const signatureBuffer = await subtle.sign(
+      {
+        name: 'ECDSA',
+        hash: { name: 'SHA-256' }
+      },
+      this.keyPair.privateKey,
+      payloadBytes
+    );
+
+    // Web Crypto API는 ECDSA P-256 서명 시 64바이트 raw IEEE P1363(r[32] + s[32])을 반환합니다.
+    return new Uint8Array(signatureBuffer);
   }
 
   /**
@@ -168,29 +214,43 @@ class CryptoStore {
   }
 
   /**
-   * 세션 카운터 증가 및 반환
+   * 세션 카운터 증가 및 반환 (차량 세션 인증용)
    */
   async getNextCounter() {
+    this.sessionCounter += 1;
+    await this.updateRecordField('sessionCounter', this.sessionCounter);
+    return this.sessionCounter;
+  }
+
+  /**
+   * 차량 응답에 맞춰 세션 카운터 동기화
+   */
+  async syncCounter(vehicleReportedCounter) {
+    this.sessionCounter = Math.max(this.sessionCounter, vehicleReportedCounter + 1);
+    await this.updateRecordField('sessionCounter', this.sessionCounter);
+    console.log(`[CryptoStore] Synchronized session counter to: ${this.sessionCounter}`);
+    return this.sessionCounter;
+  }
+
+  updateRecordField(field, value) {
     return new Promise((resolve, reject) => {
+      if (!this.db) return resolve();
       const tx = this.db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       const req = store.get('primary_key');
 
       req.onsuccess = () => {
-        const record = req.result || { id: 'primary_key', sessionCounter: 0 };
-        const counter = (record.sessionCounter || 0) + 1;
-        record.sessionCounter = counter;
-        store.put(record);
-        resolve(counter);
+        const record = req.result;
+        if (record) {
+          record[field] = value;
+          store.put(record);
+        }
+        resolve();
       };
-
       req.onerror = () => reject(req.error);
     });
   }
 
-  /**
-   * 저장된 레코드 저장 유틸
-   */
   saveRecord(record) {
     return new Promise((resolve, reject) => {
       const tx = this.db.transaction(STORE_NAME, 'readwrite');
@@ -213,7 +273,9 @@ class CryptoStore {
       req.onsuccess = () => {
         this.keyPair = null;
         this.publicKeyRaw = null;
+        this.keyId = null;
         this.isRegistered = false;
+        this.sessionCounter = 0;
         console.log('[CryptoStore] All keys and registration data cleared.');
         resolve(true);
       };

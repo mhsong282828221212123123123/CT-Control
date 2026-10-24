@@ -1,7 +1,7 @@
 /**
  * app.js
  * 메인 상태 머신 (State Machine), UI 바인딩,
- * Screen WakeLock, 급감속 감지 로직 및 PWA 초기화
+ * Screen WakeLock, 급감속 감지 로직 및 세션 서명 연동
  */
 
 import { cryptoStore } from './crypto-store.js';
@@ -192,7 +192,6 @@ class AppStateMachine {
       }
     });
 
-    // 일반 주행 화면일 때만 하단 탭 바 표시
     if (bottomNav) {
       bottomNav.style.display = (viewName === 'main') ? 'flex' : 'none';
     }
@@ -205,7 +204,6 @@ class AppStateMachine {
    */
   handleBLEStateChange(state) {
     const indicator = document.getElementById('connection-indicator');
-    const text = document.getElementById('connection-text');
 
     if (state === 'connected') {
       indicator.innerHTML = '<span class="status-dot">🟢</span><span>차량 연결됨</span>';
@@ -251,7 +249,6 @@ class AppStateMachine {
     const step2Body = document.getElementById('wizard-step-2');
     const step3Body = document.getElementById('wizard-step-3');
 
-    // 키가 없으면 Step 1 자동 생성 실행
     if (!cryptoStore.keyPair) {
       step1Node.className = 'step-item active';
       step2Node.className = 'step-item';
@@ -261,12 +258,10 @@ class AppStateMachine {
       step3Body.style.display = 'none';
 
       await cryptoStore.generateKeyPair();
-      // 생성 완료 후 Step 2로 진행
       setTimeout(() => this.updateWizardStep(), 500);
       return;
     }
 
-    // 키는 있고 미등록 상태
     step1Node.className = 'step-item completed';
     step1Body.style.display = 'none';
 
@@ -292,12 +287,12 @@ class AppStateMachine {
       if (bleManager.connectionState === 'connected') {
         try {
           const req = buildStatusRequest();
-          await bleManager.sendPacket(req, false); // 일반 우선순위
+          await bleManager.sendPacket(req, false);
         } catch (e) {
-          // 일시적 오류는 무시
+          // 일시적 오류 무시
         }
       }
-    }, 400);
+    }, 450);
   }
 
   stopTelemetryPolling() {
@@ -315,22 +310,27 @@ class AppStateMachine {
 
     // 1. 화이트리스트 승인 상태 확인
     if (data.whitelistOperationStatus === 'OK') {
-      console.log('[App] Whitelist AddKey OK received!');
+      console.log('[App] Whitelist AddKey OK confirmed!');
       cryptoStore.setRegistered(true);
       this.evaluateViewState();
     }
 
-    // 2. 텔레메트리 캐시 갱신
+    // 2. 차량에서 보고된 세션 카운터 동기화 (Session Handshake Sync)
+    if (data.reportedCounter !== null && typeof data.reportedCounter === 'number') {
+      cryptoStore.syncCounter(data.reportedCounter);
+    }
+
+    // 3. 텔레메트리 캐시 갱신
     Object.assign(this.telemetry, data);
 
-    // 3. 급감속 감지 알고리즘 실행
+    // 4. 급감속 감지 알고리즘 실행
     this.detectRapidDeceleration(data.speed);
 
-    // 4. UI 렌더링 갱신
+    // 5. UI 렌더링 갱신
     this.renderTelemetryUI();
     this.updateHeaderBadges();
 
-    // 5. 충전 상태 변화에 따른 뷰 전환 재평가
+    // 6. 충전 상태 변화에 따른 뷰 전환 재평가
     const isCharging = (this.telemetry.charging_state === 'Charging' || this.telemetry.charging_state === 'Starting');
     if (isCharging && this.currentView === 'main' && !this.isTempChargingBypass) {
       this.evaluateViewState();
@@ -342,21 +342,17 @@ class AppStateMachine {
 
   /**
    * 급감속 감지 로직:
-   * 40km/h 이상 주행 중 0.5초(500ms) 내 15km/h 이상 급감속 감지 시
-   * 즉시 '비상등 점멸' 명령을 최우선(Priority) 큐로 전송 (8초 쿨다운)
+   * 40km/h 이상 주행 중 0.5초 내 15km/h 이상 급감속 감지 시 긴급 비상등 자동 송출 (8초 쿨다운)
    */
   detectRapidDeceleration(currentSpeed) {
     if (!this.autoHazardEnabled || typeof currentSpeed !== 'number') return;
 
     const now = Date.now();
     this.speedHistory.push({ speed: currentSpeed, timestamp: now });
-
-    // 1.5초 이전의 낡은 속도 기록 제거
     this.speedHistory = this.speedHistory.filter((item) => now - item.timestamp <= 1500);
 
     if (this.speedHistory.length < 2) return;
 
-    // 0.5초 전(300ms ~ 700ms 사이) 속도 탐색
     const baseline = this.speedHistory.find((item) => {
       const dt = now - item.timestamp;
       return dt >= 300 && dt <= 700;
@@ -365,7 +361,6 @@ class AppStateMachine {
     if (baseline && baseline.speed >= 40) {
       const drop = baseline.speed - currentSpeed;
       if (drop >= 15) {
-        // 급감속 조건 충족!
         if (now - this.lastHazardTriggerTime >= this.HAZARD_COOLDOWN_MS) {
           console.warn(`[App] 🚨 RAPID DECELERATION DETECTED: -${drop} km/h! Triggering Hazard Lights.`);
           this.lastHazardTriggerTime = now;
@@ -375,9 +370,6 @@ class AppStateMachine {
     }
   }
 
-  /**
-   * 모션 센서 폴백 (속도 미수신 시 가속도 센서로 급감속 감지 지원)
-   */
   setupMotionFallback() {
     if (window.DeviceMotionEvent) {
       window.addEventListener('devicemotion', (event) => {
@@ -385,8 +377,7 @@ class AppStateMachine {
         const acc = event.accelerationIncludingGravity || event.acceleration;
         if (!acc) return;
 
-        // 전후 가속도 급감속(약 -0.8G 이하) 감지
-        const forwardG = acc.y; // 단말 거치 방향에 따라 y 또는 z 축
+        const forwardG = acc.y;
         if (forwardG && forwardG < -7.8) {
           const now = Date.now();
           if (now - this.lastHazardTriggerTime >= this.HAZARD_COOLDOWN_MS) {
@@ -408,9 +399,10 @@ class AppStateMachine {
     }
 
     try {
-      const pkt = buildFlashLightsAction();
+      // 세션 서명이 적용된 패킷 생성
+      const pkt = await buildFlashLightsAction(cryptoStore);
       await bleManager.sendPacket(pkt, true); // 최우선 큐 전송
-      console.log('[App] Auto hazard flash command sent.');
+      console.log('[App] Auto hazard flash command sent with session signature.');
     } catch (err) {
       console.error('[App] Failed to send auto hazard packet:', err);
     }
@@ -431,12 +423,12 @@ class AppStateMachine {
       el.classList.toggle('active', el.getAttribute('data-gear') === t.gear);
     });
 
-    // 파워 게이지 바 (양수: 블루 우측, 음수: 그린 좌측)
+    // 파워 게이지 바
     const powerBar = document.getElementById('power-gauge-fill');
     const powerText = document.getElementById('power-numeric-val');
     if (powerBar && powerText) {
       powerText.textContent = `${Math.round(t.power)} kW`;
-      const maxPower = 100; // 기준 100kW
+      const maxPower = 100;
       const pct = Math.min(50, Math.abs(t.power) / maxPower * 50);
 
       if (t.power >= 0) {
@@ -490,7 +482,7 @@ class AppStateMachine {
       if (rr) rr.textContent = `${t.tpms.rr} Bar`;
     }
 
-    // 4. [환경 및 배터리 요약 카드]
+    // 4. [환경 및 배터리 카드]
     const tempIn = document.getElementById('temp-in');
     const tempOut = document.getElementById('temp-out');
     const batPct = document.getElementById('cluster-battery-pct');
@@ -500,7 +492,7 @@ class AppStateMachine {
     if (batPct) batPct.textContent = `${t.battery_level}%`;
     if (batRange) batRange.textContent = `${t.ideal_battery_range_km || Math.round(t.battery_level * 4.2)} km`;
 
-    // 5. [충전 전용 뷰 렌더링]
+    // 5. [충전 화면]
     const chargeSoc = document.getElementById('charge-soc-text');
     const chargeProgress = document.getElementById('charge-progress-bar-fill');
     const chargeLimit = document.getElementById('charge-limit-text');
@@ -525,13 +517,11 @@ class AppStateMachine {
     if (chargeRange) chargeRange.textContent = `${t.ideal_battery_range_km || Math.round(t.battery_level * 4.2)} km`;
     if (chargeTemp) chargeTemp.textContent = `${t.inside_temp} °C`;
 
-    // 6. [제어 탭 도어 안전 잠금 상태 갱신]
     this.updateDoorSafetyLocks();
   }
 
   /**
-   * 도어 안전 잠금 처리:
-   * 기어가 P가 아니거나 속도가 0 초과일 때 4개 도어 버튼 비활성화 (오버라이드 체크박스 지원)
+   * 도어 안전 잠금 처리
    */
   updateDoorSafetyLocks() {
     const forceUnlock = document.getElementById('chk-force-unlock')?.checked;
@@ -609,9 +599,11 @@ class AppStateMachine {
     document.getElementById('btn-stop-charge')?.addEventListener('click', async () => {
       this.triggerHaptic(100);
       try {
-        await bleManager.sendPacket(buildStopChargeAction(), true);
+        const stopPkt = await buildStopChargeAction(cryptoStore);
+        await bleManager.sendPacket(stopPkt, true);
         await new Promise(r => setTimeout(r, 300));
-        await bleManager.sendPacket(buildChargePortUnlockAction(), true);
+        const unlockPkt = await buildChargePortUnlockAction(cryptoStore);
+        await bleManager.sendPacket(unlockPkt, true);
         alert('충전 중지 및 포트 잠금 해제 명령을 전송했습니다.');
       } catch (e) {
         alert('명령 전송 실패: ' + e.message);
@@ -648,7 +640,7 @@ class AppStateMachine {
       tabContentControl.style.display = 'flex';
     });
 
-    // 5. 제어 탭: 급감속 스위치 & 강제 언락 체크박스
+    // 5. 제어 탭 옵션
     document.getElementById('switch-auto-hazard')?.addEventListener('change', (e) => {
       this.triggerHaptic(30);
       this.autoHazardEnabled = e.target.checked;
@@ -659,7 +651,7 @@ class AppStateMachine {
       this.updateDoorSafetyLocks();
     });
 
-    // 6. 제어 탭: 비상등 점멸 버튼 (땡큐 비상등)
+    // 6. 제어 탭: 비상등 점멸 (땡큐 비상등 - 서명 적용)
     const hazardBtn = document.getElementById('btn-hazard-flash');
     hazardBtn?.addEventListener('click', async () => {
       this.triggerHaptic(80);
@@ -667,14 +659,14 @@ class AppStateMachine {
       setTimeout(() => hazardBtn.classList.remove('flash-effect'), 400);
 
       try {
-        const pkt = buildFlashLightsAction();
-        await bleManager.sendPacket(pkt, true); // 최우선 큐
+        const pkt = await buildFlashLightsAction(cryptoStore);
+        await bleManager.sendPacket(pkt, true);
       } catch (err) {
         console.error('Hazard packet error:', err);
       }
     });
 
-    // 7. 제어 탭: 4개 도어 래치 물리 개방 (Unlatch)
+    // 7. 제어 탭: 4개 도어 래치 물리 개방 (Unlatch - 서명 적용)
     const doorBtns = document.querySelectorAll('.door-tile-btn');
     doorBtns.forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -685,21 +677,18 @@ class AppStateMachine {
 
         const doorIndex = parseInt(btn.getAttribute('data-door'), 10);
         try {
-          const pkt = buildOpenDoorAction(doorIndex);
-          await bleManager.sendPacket(pkt, true); // 최우선 큐
+          const pkt = await buildOpenDoorAction(doorIndex, cryptoStore);
+          await bleManager.sendPacket(pkt, true);
         } catch (err) {
           console.error(`Door ${doorIndex} unlatch failed:`, err);
         }
       });
     });
 
-    // 8. 상단 로고 5초 길게 누르면 [🛠️ 시뮬레이션/데모 모드] 활성화
+    // 8. 5초 롱프레스 데모 모드
     this.setupDemoModeTrigger();
   }
 
-  /**
-   * 상단 헤더 로고 5초 길게 누르기 히든 트리거
-   */
   setupDemoModeTrigger() {
     const logo = document.getElementById('brand-logo');
     const modal = document.getElementById('demo-modal');
@@ -712,7 +701,7 @@ class AppStateMachine {
         this.triggerHaptic(120);
         modal.classList.add('active');
         bleManager.isSimulation = true;
-      }, 5000); // 5초
+      }, 5000);
     };
 
     const cancelPress = () => {
@@ -732,7 +721,6 @@ class AppStateMachine {
       modal.classList.remove('active');
     });
 
-    // 데모 모드 버튼 액션들
     document.getElementById('btn-sim-driving')?.addEventListener('click', () => {
       modal.classList.remove('active');
       bleManager.updateState('connected');
@@ -752,15 +740,13 @@ class AppStateMachine {
     document.getElementById('btn-sim-hard-brake')?.addEventListener('click', () => {
       modal.classList.remove('active');
       bleManager.updateState('connected');
-      // 1단계: 60km/h 주행
       bleManager.injectSimulatedMessage({
         speed: 60,
         gear: 'D',
-        power: -45, // 강한 회생제동
+        power: -45,
         battery_level: 74,
         charging_state: 'Disconnected'
       });
-      // 2단계: 400ms 뒤 10km/h로 급감속 (-50km/h 변화)
       setTimeout(() => {
         bleManager.injectSimulatedMessage({
           speed: 10,
@@ -799,7 +785,6 @@ class AppStateMachine {
   }
 }
 
-// 애플리케이션 진입점 실행
 window.addEventListener('DOMContentLoaded', () => {
   const app = new AppStateMachine();
   app.init();

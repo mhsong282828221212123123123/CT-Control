@@ -2,11 +2,17 @@
  * ble-manager.js
  * Web Bluetooth GATT 통신, 2바이트 빅엔디안 길이 헤더 프레이밍,
  * MTU 청크 분할 전송 및 우선순위 큐 관리자
+ * 
+ * Tesla vehicle-command 공식 BLE 규격 준수:
+ * - Service: 00000211-b2d1-43f0-9b88-960cebf8b91e (Short: 0x0211)
+ * - TX: 00000212-b2d1-43f0-9b88-960cebf8b91e (To VCSEC / Write)
+ * - RX: 00000213-b2d1-43f0-9b88-960cebf8b91e (From VCSEC / Notify)
  */
 
 import { parseIncomingMessage } from './proto-codec.js';
 
 export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e';
+export const TESLA_SHORT_SERVICE_UUID = 0x0211;
 export const TESLA_TX_CHAR_UUID = '00000212-b2d1-43f0-9b88-960cebf8b91e'; // To VCSEC (Write)
 export const TESLA_RX_CHAR_UUID = '00000213-b2d1-43f0-9b88-960cebf8b91e'; // From VCSEC (Notify)
 
@@ -51,6 +57,7 @@ class BLEManager {
 
   /**
    * Web Bluetooth 장치 검색 및 GATT 연결 시작
+   * 테슬라 BLE advertisement 스캔 누락 방지를 위한 다중 필터 및 Optional Services 등록
    */
   async connect() {
     if (this.isSimulation) {
@@ -66,14 +73,19 @@ class BLEManager {
     try {
       this.updateState('connecting');
 
-      console.log('[BLEManager] Requesting Bluetooth Device...');
+      console.log('[BLEManager] Requesting Bluetooth Device with Tesla filters...');
+      
+      // 테슬라 차량 검색 누락 방지를 위한 정밀 필터 구성
       this.device = await navigator.bluetooth.requestDevice({
         filters: [
+          { services: [TESLA_SHORT_SERVICE_UUID] },
           { services: [TESLA_SERVICE_UUID] },
-          { namePrefix: 'S' },
-          { namePrefix: 'Tesla' }
+          { namePrefix: 'S' }
         ],
-        optionalServices: [TESLA_SERVICE_UUID, 0x0211]
+        optionalServices: [
+          TESLA_SERVICE_UUID,
+          TESLA_SHORT_SERVICE_UUID
+        ]
       });
 
       this.device.addEventListener('gattserverdisconnected', () => {
@@ -82,7 +94,7 @@ class BLEManager {
         this.updateState('disconnected');
       });
 
-      console.log('[BLEManager] Connecting to GATT Server...');
+      console.log(`[BLEManager] Connecting to GATT Server (${this.device.name || this.device.id})...`);
       this.server = await this.device.gatt.connect();
 
       console.log('[BLEManager] Getting Tesla Primary Service...');

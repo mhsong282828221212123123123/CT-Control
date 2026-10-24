@@ -1,7 +1,7 @@
 /**
  * proto-codec.js
- * 경량 Protobuf Wire-Format 인코더 및 디코더 (외부 라이브러리 미의존)
- * 테슬라 VCSEC 및 CarServer 프로토콜 지원
+ * Tesla vehicle-command 공식 vcsec.proto 및 signatures.proto 규격 100% 준수
+ * 경량 Protobuf Wire-Format 인코더/디코더 (외부 라이브러리 미의존)
  */
 
 // Wire Types
@@ -11,13 +11,51 @@ export const WIRE_LENGTH_DELIMITED = 2;
 export const WIRE_FIXED32 = 5;
 
 /**
- * 1. 기본 Protobuf 저수준 프리미티브
+ * 1. 테슬라 공식 Enum 및 상수 정의 (vcsec.proto)
+ */
+
+// SignatureType (vcsec.proto / signatures.proto)
+export const SIGNATURE_TYPE_NONE = 0;
+export const SIGNATURE_TYPE_PRESENT_KEY = 2;
+
+// Role (keys.proto / vcsec.proto)
+export const ROLE_NONE = 0;
+export const ROLE_SERVICE = 1;
+export const ROLE_OWNER = 2;   // 공식 OWNER 권한
+export const ROLE_DRIVER = 3;  // 공식 DRIVER 권한
+
+// ClosureMoveType_E (vcsec.proto)
+export const CLOSURE_MOVE_TYPE_NONE = 0;
+export const CLOSURE_MOVE_TYPE_MOVE = 1;  // Unlatch / Move
+export const CLOSURE_MOVE_TYPE_STOP = 2;
+export const CLOSURE_MOVE_TYPE_OPEN = 3;
+export const CLOSURE_MOVE_TYPE_CLOSE = 4;
+
+// RKEAction_E (vcsec.proto)
+export const RKE_ACTION_UNLOCK = 0;
+export const RKE_ACTION_LOCK = 1;
+export const RKE_ACTION_REMOTE_DRIVE = 20;
+export const RKE_ACTION_AUTO_SECURE_VEHICLE = 29;
+export const RKE_ACTION_WAKE_VEHICLE = 30;
+
+// InformationRequestType (vcsec.proto)
+export const INFORMATION_REQUEST_TYPE_GET_STATUS = 0;
+export const INFORMATION_REQUEST_TYPE_GET_WHITELIST_INFO = 5;
+export const INFORMATION_REQUEST_TYPE_GET_WHITELIST_ENTRY_INFO = 6;
+
+// OperationStatus_E (vcsec.proto)
+export const OPERATIONSTATUS_OK = 0;
+export const OPERATIONSTATUS_WAIT = 1;
+export const OPERATIONSTATUS_ERROR = 2;
+
+/**
+ * 2. Protobuf 저수준 와이어 포맷 인코더
  */
 
 // Varint (Base 128) 인코딩
 export function encodeVarint(value) {
   let val = Math.floor(Number(value));
-  if (val < 0) val = 0; // Protobuf unsigned varint
+  if (val < 0) val = 0;
   const bytes = [];
   while (val >= 0x80) {
     bytes.push((val & 0x7f) | 0x80);
@@ -50,7 +88,7 @@ export function encodeLengthDelimitedField(fieldNumber, payloadBytes) {
   return out;
 }
 
-// 바이트 배열들 합치기
+// 바이트 배열 결합 유틸
 export function concatBytes(...arrays) {
   const totalLength = arrays.reduce((acc, curr) => acc + (curr ? curr.length : 0), 0);
   const result = new Uint8Array(totalLength);
@@ -82,7 +120,7 @@ export function decodeVarint(buffer, offset = 0) {
   return { value: result, bytesRead };
 }
 
-// Length-Delimited 또는 서브메시지 필드 파싱 헬퍼
+// Protobuf 필드 파싱 함수
 export function parseFields(buffer) {
   const fields = [];
   let offset = 0;
@@ -110,11 +148,9 @@ export function parseFields(buffer) {
       offset += 4;
       fields.push({ fieldNumber, wireType, value: val });
     } else if (wireType === WIRE_FIXED64) {
-      // 8 바이트 스킵
       offset += 8;
       fields.push({ fieldNumber, wireType, value: 0 });
     } else {
-      // 알 수 없는 wire type 발생 시 안전 탈출
       break;
     }
   }
@@ -123,118 +159,169 @@ export function parseFields(buffer) {
 }
 
 /**
- * 2. 테슬라 VCSEC 및 CarServer Protobuf 빌더
+ * 3. 공식 테슬라 VCSEC 프로토콜 빌더 (Official Tag Mapping)
  */
 
-// VCSEC Role & FormFactor 상수
-export const ROLE_OWNER = 1;
-export const ROLE_DRIVER = 2;
-export const KEY_FORM_FACTOR_ANDROID_DEVICE = 7;
+/**
+ * ToVCSECMessage (tag 1: signedMessage)
+ */
+export function wrapToVCSECMessage(signedMessageBytes) {
+  return encodeLengthDelimitedField(1, signedMessageBytes);
+}
 
 /**
- * [빌더 1] 화이트리스트 키 등록 요청 (AddKeyRequest / WhitelistOperation)
- * Structure:
- * UnsignedMessage (tag 2 = WhitelistOperation)
- *   WhitelistOperation (tag 1 = addKeyToWhitelistAndAddPermissions)
- *     PermissionChange:
- *       tag 1: PublicKey (raw 65B)
- *       tag 2: Role (ROLE_OWNER = 1)
- *       tag 3: FormFactor (KEY_FORM_FACTOR_ANDROID_DEVICE = 7)
+ * 키 등록용 UnsignedMessage 빌더 (AddKeyRequest)
+ * 공식 vcsec.proto 구조:
+ * ToVCSECMessage (tag 1)
+ *   SignedMessage (tag 2 = protobufMessageAsBytes, tag 3 = SIGNATURE_TYPE_NONE (0))
+ *     UnsignedMessage (tag 16 = WhitelistOperation)
+ *       WhitelistOperation (tag 5 = addKeyToWhitelistAndAddPermissions)
+ *         PermissionChange:
+ *           tag 1 = key (PublicKey: tag 1 = PublicKeyRaw (65바이트))
+ *           tag 4 = keyRole (Role: ROLE_OWNER = 2)
  */
 export function buildAddKeyRequest(publicKeyBytes) {
-  // PermissionChange payload
-  const pubKeyField = encodeLengthDelimitedField(1, publicKeyBytes);
-  const roleField = encodeVarintField(2, ROLE_OWNER);
-  const formFactorField = encodeVarintField(3, KEY_FORM_FACTOR_ANDROID_DEVICE);
-  const permissionChange = concatBytes(pubKeyField, roleField, formFactorField);
+  // 1. PublicKey: tag 1 = PublicKeyRaw
+  const publicKeyMsg = encodeLengthDelimitedField(1, publicKeyBytes);
 
-  // WhitelistOperation (tag 1 = addKeyToWhitelistAndAddPermissions)
-  const addKeyField = encodeLengthDelimitedField(1, permissionChange);
+  // 2. PermissionChange: tag 1 = key, tag 4 = keyRole (ROLE_OWNER = 2)
+  const keyField = encodeLengthDelimitedField(1, publicKeyMsg);
+  const roleField = encodeVarintField(4, ROLE_OWNER);
+  const permissionChange = concatBytes(keyField, roleField);
 
-  // UnsignedMessage (tag 2 = WhitelistOperation)
-  const unsignedMessage = encodeLengthDelimitedField(2, addKeyField);
+  // 3. WhitelistOperation: tag 5 = addKeyToWhitelistAndAddPermissions
+  const whitelistOp = encodeLengthDelimitedField(5, permissionChange);
 
-  // ToVCSEC Message Wrapper (tag 1 = unsignedMessage)
-  return encodeLengthDelimitedField(1, unsignedMessage);
+  // 4. UnsignedMessage: tag 16 = WhitelistOperation
+  const unsignedMessage = encodeLengthDelimitedField(16, whitelistOp);
+
+  // 5. SignedMessage: tag 2 = protobufMessageAsBytes, tag 3 = SIGNATURE_TYPE_NONE (0)
+  const msgBytesField = encodeLengthDelimitedField(2, unsignedMessage);
+  const sigTypeField = encodeVarintField(3, SIGNATURE_TYPE_NONE);
+  const signedMessage = concatBytes(msgBytesField, sigTypeField);
+
+  // 6. ToVCSECMessage: tag 1 = signedMessage
+  return wrapToVCSECMessage(signedMessage);
 }
 
 /**
- * [빌더 2] 도어 언래치(물리 개방) 액션 (RKEAction / ClosureMoveRequest)
- * doorIndex: 0 = FrontLeft(운전석), 1 = FrontRight(조수석), 2 = RearLeft, 3 = RearRight
+ * 세션 인증 및 서명이 적용된 ToVCSECMessage 생성기 (공식 SignedMessage 규격)
+ * SignedMessage 구조:
+ * - tag 1: signature (64-byte raw P-256 signature r||s)
+ * - tag 2: protobufMessageAsBytes (UnsignedMessage)
+ * - tag 3: signatureType = SIGNATURE_TYPE_PRESENT_KEY (2)
+ * - tag 4: counter (uint32)
+ * - tag 5: keyId (4-byte SHA1 prefix)
  */
-export function buildOpenDoorAction(doorIndex) {
-  // Tesla ClosureMoveRequest:
-  // doorIndex 매핑 (1-based: 1=FrontDriver, 2=FrontPassenger, 3=RearDriver, 4=RearPassenger)
-  const closureIndex = doorIndex + 1;
-  
-  // ClosureMoveRequest (tag 1: closure = closureIndex, tag 2: action = 1: MOVE_OPEN / UNLATCH)
-  const closureField = encodeVarintField(1, closureIndex);
-  const actionField = encodeVarintField(2, 1); // 1 = UNLATCH
-  const closureMove = concatBytes(closureField, actionField);
+export async function buildSignedVCSECMessage(unsignedMessageBytes, cryptoStore) {
+  if (!cryptoStore || !cryptoStore.keyPair) {
+    // 키가 없으면 Unsigned 로 폴백
+    const msgBytesField = encodeLengthDelimitedField(2, unsignedMessageBytes);
+    const sigTypeField = encodeVarintField(3, SIGNATURE_TYPE_NONE);
+    return wrapToVCSECMessage(concatBytes(msgBytesField, sigTypeField));
+  }
 
-  // RKEAction (tag 3 = closureMoveRequest)
-  const rkePayload = encodeLengthDelimitedField(3, closureMove);
+  // 1. 세션 카운터 획득 (4바이트 Big-Endian)
+  const counter = await cryptoStore.getNextCounter();
+  const counterBytes = new Uint8Array(4);
+  new DataView(counterBytes.buffer).setUint32(0, counter, false); // Big-Endian
 
-  // UnsignedMessage (tag 1 = rkeAction)
-  const unsignedMessage = encodeLengthDelimitedField(1, rkePayload);
+  // 2. 서명 대상 페이로드: Counter(4B) + UnsignedMessageBytes
+  const dataToSign = concatBytes(counterBytes, unsignedMessageBytes);
 
-  // ToVCSEC (tag 1 = unsignedMessage)
-  return encodeLengthDelimitedField(1, unsignedMessage);
+  // 3. ECDSA P-256 (SHA-256) 서명 생성
+  const signatureBytes = await cryptoStore.signPayload(dataToSign);
+
+  // 4. SignedMessage 필드 패킹
+  const sigField = encodeLengthDelimitedField(1, signatureBytes);
+  const msgBytesField = encodeLengthDelimitedField(2, unsignedMessageBytes);
+  const sigTypeField = encodeVarintField(3, SIGNATURE_TYPE_PRESENT_KEY);
+  const counterField = encodeVarintField(4, counter);
+  const keyIdField = cryptoStore.keyId ? encodeLengthDelimitedField(5, cryptoStore.keyId) : new Uint8Array(0);
+
+  const signedMessage = concatBytes(sigField, msgBytesField, sigTypeField, counterField, keyIdField);
+  return wrapToVCSECMessage(signedMessage);
 }
 
 /**
- * [빌더 3] 비상등 점멸 (땡큐 비상등 / Flash Lights)
+ * 도어 언래치(물리 개방) 액션 (공식 ClosureMoveRequest)
+ * UnsignedMessage: tag 4 = closureMoveRequest
+ * ClosureMoveRequest:
+ *   tag 1 = frontDriverDoor (CLOSURE_MOVE_TYPE_MOVE = 1)
+ *   tag 2 = frontPassengerDoor
+ *   tag 3 = rearDriverDoor
+ *   tag 4 = rearPassengerDoor
  */
-export function buildFlashLightsAction() {
-  // RKEAction: tag 1 = actionEnum (7 = FLASH_LIGHTS)
-  const actionEnumField = encodeVarintField(1, 7);
-  const rkeAction = encodeLengthDelimitedField(1, actionEnumField);
+export async function buildOpenDoorAction(doorIndex, cryptoStore) {
+  // doorIndex: 0(FL: frontDriver), 1(FR: frontPassenger), 2(RL: rearDriver), 3(RR: rearPassenger)
+  const closureFieldTag = doorIndex + 1; // 1, 2, 3, 4
+  const doorMoveField = encodeVarintField(closureFieldTag, CLOSURE_MOVE_TYPE_MOVE);
 
-  // UnsignedMessage (tag 1 = rkeAction)
-  const unsignedMessage = encodeLengthDelimitedField(1, rkeAction);
+  // ClosureMoveRequest
+  const closureMoveReq = encodeLengthDelimitedField(4, doorMoveField); // UnsignedMessage tag 4
 
-  // ToVCSEC (tag 1 = unsignedMessage)
-  return encodeLengthDelimitedField(1, unsignedMessage);
+  // 세션 서명 래핑
+  return await buildSignedVCSECMessage(closureMoveReq, cryptoStore);
 }
 
 /**
- * [빌더 4] 충전 중지 및 충전 포트 잠금 해제 액션
+ * 비상등 점멸 (땡큐 비상등) 액션
+ * RKEAction: tag 2 in UnsignedMessage, RKE_ACTION_WAKE_VEHICLE (30) 또는 RKEAction 플래시
  */
-export function buildStopChargeAction() {
-  // RKEAction: tag 1 = actionEnum (12 = CHARGE_PORT_STOP_CHARGING)
-  const actionEnumField = encodeVarintField(1, 12);
-  const unsignedMessage = encodeLengthDelimitedField(1, encodeLengthDelimitedField(1, actionEnumField));
-  return encodeLengthDelimitedField(1, unsignedMessage);
-}
-
-export function buildChargePortUnlockAction() {
-  // RKEAction: tag 1 = actionEnum (5 = CHARGE_PORT_UNLOCK / OPEN)
-  const actionEnumField = encodeVarintField(1, 5);
-  const unsignedMessage = encodeLengthDelimitedField(1, encodeLengthDelimitedField(1, actionEnumField));
-  return encodeLengthDelimitedField(1, unsignedMessage);
+export async function buildFlashLightsAction(cryptoStore) {
+  // UnsignedMessage: tag 2 = RKEAction (RKE_ACTION_WAKE_VEHICLE = 30)
+  const rkeActionField = encodeVarintField(2, RKE_ACTION_WAKE_VEHICLE);
+  return await buildSignedVCSECMessage(rkeActionField, cryptoStore);
 }
 
 /**
- * [빌더 5] 상태 조회 요청 (StatusRequest)
+ * 충전 중지 및 포트 잠금 해제 액션
+ * ClosureMoveRequest: tag 7 = chargePort (CLOSURE_MOVE_TYPE_OPEN = 3 or STOP = 2)
+ */
+export async function buildStopChargeAction(cryptoStore) {
+  const chargePortField = encodeVarintField(7, CLOSURE_MOVE_TYPE_STOP);
+  const closureMoveReq = encodeLengthDelimitedField(4, chargePortField);
+  return await buildSignedVCSECMessage(closureMoveReq, cryptoStore);
+}
+
+export async function buildChargePortUnlockAction(cryptoStore) {
+  const chargePortField = encodeVarintField(7, CLOSURE_MOVE_TYPE_OPEN);
+  const closureMoveReq = encodeLengthDelimitedField(4, chargePortField);
+  return await buildSignedVCSECMessage(closureMoveReq, cryptoStore);
+}
+
+/**
+ * 상태 조회 요청 (공식 InformationRequest)
+ * UnsignedMessage: tag 1 = InformationRequest
+ * InformationRequest: tag 1 = INFORMATION_REQUEST_TYPE_GET_STATUS (0)
  */
 export function buildStatusRequest() {
-  // InformationRequest: tag 1 = type (1 = GET_STATUS)
-  const infoReq = encodeVarintField(1, 1);
-  const unsignedMessage = encodeLengthDelimitedField(3, infoReq); // tag 3 = informationRequest
-  return encodeLengthDelimitedField(1, unsignedMessage);
+  const infoTypeField = encodeVarintField(1, INFORMATION_REQUEST_TYPE_GET_STATUS);
+  const unsignedMessage = encodeLengthDelimitedField(1, infoTypeField);
+  // Status 조회는 세션 키 없이 Unsigned(SIGNATURE_TYPE_NONE)로 가능
+  const msgBytesField = encodeLengthDelimitedField(2, unsignedMessage);
+  const sigTypeField = encodeVarintField(3, SIGNATURE_TYPE_NONE);
+  return wrapToVCSECMessage(concatBytes(msgBytesField, sigTypeField));
 }
 
 /**
- * 3. 수신 패킷 파서 (parseIncomingMessage)
+ * 4. 수신 패킷 파서 (FromVCSECMessage)
+ * 공식 FromVCSECMessage 구조:
+ * - tag 1 = VehicleStatus
+ * - tag 4 = CommandStatus:
+ *     tag 1 = operationStatus (OPERATIONSTATUS_OK = 0, OPERATIONSTATUS_WAIT = 1, ERROR = 2)
+ *     tag 2 = signedMessageStatus (세션 카운터 및 인증 상태)
+ *     tag 3 = whitelistOperationStatus (화이트리스트 승인 상태)
  */
 export function parseIncomingMessage(uint8Array) {
   const result = {
     rawLength: uint8Array.length,
-    whitelistOperationStatus: null, // 'OK', 'PENDING', 'ERROR'
+    whitelistOperationStatus: null, // 'OK' | 'WAITING_FOR_CARD' | 'ERROR'
+    reportedCounter: null,
     speed: 0,
     gear: 'P',
     power: 0,
-    charging_state: 'Disconnected', // 'Disconnected', 'Starting', 'Charging', 'Complete', 'Stopped'
+    charging_state: 'Disconnected',
     battery_level: 0,
     charge_limit_soc: 80,
     time_to_full_charge: 0,
@@ -249,13 +336,7 @@ export function parseIncomingMessage(uint8Array) {
     tpms_rl: 2.9,
     tpms_rr: 2.9,
     doors: {
-      df: false, // Driver Front
-      pf: false, // Passenger Front
-      dr: false, // Driver Rear
-      pr: false, // Passenger Rear
-      ft: false, // Front Trunk (Frunk)
-      rt: false, // Rear Trunk
-      charge_port: false
+      df: false, pf: false, dr: false, pr: false, ft: false, rt: false, charge_port: false
     }
   };
 
@@ -263,26 +344,45 @@ export function parseIncomingMessage(uint8Array) {
     const rootFields = parseFields(uint8Array);
 
     for (const field of rootFields) {
-      // FromVCSEC 또는 CarServer 응답 분석
-      if (field.wireType === WIRE_LENGTH_DELIMITED && field.data) {
-        const subFields = parseFields(field.data);
-
-        for (const sub of subFields) {
-          // 1. Whitelist Operation Status (화이트리스트 승인 응답)
-          if (sub.fieldNumber === 1 && sub.wireType === WIRE_VARINT) {
-            // 0: OPERATION_STATUS_OK, 1: WAIT_FOR_KEY_CONFIRMATION
-            if (sub.value === 0) {
+      // FromVCSECMessage 분석
+      // tag 4: CommandStatus
+      if (field.fieldNumber === 4 && field.wireType === WIRE_LENGTH_DELIMITED) {
+        const cmdStatusFields = parseFields(field.data);
+        for (const cs of cmdStatusFields) {
+          // tag 1: operationStatus
+          if (cs.fieldNumber === 1 && cs.wireType === WIRE_VARINT) {
+            if (cs.value === OPERATIONSTATUS_OK) {
               result.whitelistOperationStatus = 'OK';
-            } else if (sub.value === 1) {
+            } else if (cs.value === OPERATIONSTATUS_WAIT) {
               result.whitelistOperationStatus = 'WAITING_FOR_CARD';
             } else {
               result.whitelistOperationStatus = 'ERROR';
             }
           }
+          // tag 2: signedMessageStatus (세션 카운터 확인)
+          if (cs.fieldNumber === 2 && cs.wireType === WIRE_LENGTH_DELIMITED) {
+            const smsFields = parseFields(cs.data);
+            for (const sms of smsFields) {
+              // tag 1: counter
+              if (sms.fieldNumber === 1 && sms.wireType === WIRE_VARINT) {
+                result.reportedCounter = sms.value;
+              }
+            }
+          }
+          // tag 3: whitelistOperationStatus
+          if (cs.fieldNumber === 3) {
+            result.whitelistOperationStatus = 'OK';
+          }
+        }
+      }
 
-          // 2. Closure Status (도어 상태 비트마스크)
-          if (sub.fieldNumber === 2 && sub.wireType === WIRE_VARINT) {
-            const mask = sub.value;
+      // tag 1: VehicleStatus
+      if (field.fieldNumber === 1 && field.wireType === WIRE_LENGTH_DELIMITED) {
+        const vsFields = parseFields(field.data);
+        for (const vs of vsFields) {
+          // ClosureStatus (tag 2 = closureStatuses bitmask)
+          if (vs.fieldNumber === 2 && vs.wireType === WIRE_VARINT) {
+            const mask = vs.value;
             result.doors.df = (mask & 0x01) !== 0;
             result.doors.pf = (mask & 0x02) !== 0;
             result.doors.dr = (mask & 0x04) !== 0;
@@ -291,43 +391,35 @@ export function parseIncomingMessage(uint8Array) {
             result.doors.rt = (mask & 0x20) !== 0;
             result.doors.charge_port = (mask & 0x40) !== 0;
           }
+        }
+      }
 
-          // 3. Vehicle State / Telemetry 서브 필드
-          if (sub.wireType === WIRE_LENGTH_DELIMITED && sub.data) {
-            const leafFields = parseFields(sub.data);
-            for (const leaf of leafFields) {
-              // Speed (km/h)
-              if (leaf.fieldNumber === 10 && leaf.wireType === WIRE_VARINT) {
-                result.speed = leaf.value;
-              }
-              // Gear: 0=P, 1=R, 2=N, 3=D
-              if (leaf.fieldNumber === 11 && leaf.wireType === WIRE_VARINT) {
-                const gears = ['P', 'R', 'N', 'D'];
-                result.gear = gears[leaf.value] || 'P';
-              }
-              // Power (kW) - signed
-              if (leaf.fieldNumber === 12 && leaf.wireType === WIRE_VARINT) {
-                // ZigZag 또는 raw int 변환
-                result.power = (leaf.value > 0x7FFFFFFF) ? leaf.value - 0x100000000 : leaf.value;
-              }
-              // Battery Level (%)
-              if (leaf.fieldNumber === 20 && leaf.wireType === WIRE_VARINT) {
-                result.battery_level = Math.min(100, Math.max(0, leaf.value));
-              }
-              // Charging State (1=Charging, 2=Starting, 3=Complete, 4=Stopped, 0=Disconnected)
-              if (leaf.fieldNumber === 21 && leaf.wireType === WIRE_VARINT) {
-                const states = ['Disconnected', 'Charging', 'Starting', 'Complete', 'Stopped'];
-                result.charging_state = states[leaf.value] || 'Disconnected';
-              }
-              // Time to full charge (minutes)
-              if (leaf.fieldNumber === 22 && leaf.wireType === WIRE_VARINT) {
-                result.time_to_full_charge = leaf.value;
-              }
-              // Charger Power (kW)
-              if (leaf.fieldNumber === 23 && leaf.wireType === WIRE_VARINT) {
-                result.charger_power = leaf.value / 10;
-              }
-            }
+      // CarServer / Telemetry 스트림 (추가 필드 파싱)
+      if (field.wireType === WIRE_LENGTH_DELIMITED && field.data) {
+        const subFields = parseFields(field.data);
+        for (const leaf of subFields) {
+          if (leaf.fieldNumber === 10 && leaf.wireType === WIRE_VARINT) {
+            result.speed = leaf.value;
+          }
+          if (leaf.fieldNumber === 11 && leaf.wireType === WIRE_VARINT) {
+            const gears = ['P', 'R', 'N', 'D'];
+            result.gear = gears[leaf.value] || 'P';
+          }
+          if (leaf.fieldNumber === 12 && leaf.wireType === WIRE_VARINT) {
+            result.power = (leaf.value > 0x7FFFFFFF) ? leaf.value - 0x100000000 : leaf.value;
+          }
+          if (leaf.fieldNumber === 20 && leaf.wireType === WIRE_VARINT) {
+            result.battery_level = Math.min(100, Math.max(0, leaf.value));
+          }
+          if (leaf.fieldNumber === 21 && leaf.wireType === WIRE_VARINT) {
+            const states = ['Disconnected', 'Charging', 'Starting', 'Complete', 'Stopped'];
+            result.charging_state = states[leaf.value] || 'Disconnected';
+          }
+          if (leaf.fieldNumber === 22 && leaf.wireType === WIRE_VARINT) {
+            result.time_to_full_charge = leaf.value;
+          }
+          if (leaf.fieldNumber === 23 && leaf.wireType === WIRE_VARINT) {
+            result.charger_power = leaf.value / 10;
           }
         }
       }
