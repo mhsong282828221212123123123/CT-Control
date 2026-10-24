@@ -9,7 +9,7 @@
  * - RX: 00000213-b2d1-43f0-9b88-960cebf8b91e (From VCSEC / Notify)
  */
 
-import { parseIncomingMessage } from './proto-codec.js?v=8';
+import { parseIncomingMessage } from './proto-codec.js?v=9';
 
 export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e';
 export const TESLA_TX_CHAR_UUID = '00000212-b2d1-43f0-9b88-960cebf8b91e'; // To VCSEC (Write)
@@ -76,9 +76,12 @@ class BLEManager {
   }
 
   /**
-   * Web Bluetooth 장치 검색 및 GATT 연결 [v8: 테슬라 키 전용 S-노드 타겟 스캔]
+   * Web Bluetooth 장치 검색 및 GATT 연결 [v9: 다중 스캔 모드 및 오디오 장치 차단]
+   * @param {Object} options - { mode: 'standard' | 'all' }
    */
-  async connect() {
+  async connect(options = {}) {
+    const mode = options.mode || 'standard';
+
     if (this.isSimulation) {
       this.updateState('connecting');
       setTimeout(() => this.updateState('connected'), 600);
@@ -92,25 +95,35 @@ class BLEManager {
     this.updateState('connecting');
 
     try {
-      this.log('테슬라 차량 가상키 노드(S로 시작하는 기기) 검색을 시작합니다...');
-
-      // [v8 핵심] 오디오 블루투스를 배제하고 오직 테슬라 보안 가상키 노드만 정확히 스캔
-      // Service UUID 대기 지연 없이 namePrefix만으로 즉시 0초 만에 목록에 표시
-      try {
+      if (mode === 'all') {
+        this.log('모든 BLE 기기를 검색합니다 (필터 해제 모드)...');
         this.device = await navigator.bluetooth.requestDevice({
-          filters: [
-            { namePrefix: 'S' },
-            { namePrefix: 's' }
-          ],
+          acceptAllDevices: true,
           optionalServices: [
             TESLA_SERVICE_UUID,
             '00000211-b2d1-43f0-9b88-960cebf8b91e'
           ]
         });
-      } catch (scanErr) {
-        // 혹시 장치가 대소문자 다르거나 namePrefix에 걸리지 않는 경우를 위한 폴백
-        if (scanErr.name !== 'NotFoundError') {
-          console.warn('[BLEManager] Primary namePrefix filter failed, falling back...', scanErr);
+      } else {
+        this.log('테슬라 표준 스캔(Service UUID 0x0211 + S-Prefix)을 시작합니다...');
+        // [v9 표준 스캔]: 안드로이드 SCAN_RSP 및 ADV_IND를 모두 포괄하는 OR 필터
+        try {
+          this.device = await navigator.bluetooth.requestDevice({
+            filters: [
+              { services: [TESLA_SERVICE_UUID] },
+              { namePrefix: 'S' },
+              { namePrefix: 's' }
+            ],
+            optionalServices: [
+              TESLA_SERVICE_UUID,
+              '00000211-b2d1-43f0-9b88-960cebf8b91e'
+            ]
+          });
+        } catch (filterErr) {
+          if (filterErr.name === 'NotFoundError') {
+            throw filterErr;
+          }
+          console.warn('[BLEManager] Primary standard filter error, trying fallback...', filterErr);
           this.device = await navigator.bluetooth.requestDevice({
             acceptAllDevices: true,
             optionalServices: [
@@ -118,15 +131,23 @@ class BLEManager {
               '00000211-b2d1-43f0-9b88-960cebf8b91e'
             ]
           });
-        } else {
-          throw scanErr;
         }
       }
 
       const devName = this.device.name || '(이름 없는 기기)';
       this.log(`기기 선택 완료: ${devName} (${this.device.id})`);
-      if (devName.endsWith('C') || devName.includes('C')) {
-        this.log(`[식별 성공] 메인 컨트롤러(C/CD) 노드가 선택되었습니다: ${devName}`);
+
+      // [v9 안전 검증] 사용자가 오디오 블루투스를 선택했을 경우 즉시 안내 및 차단
+      if (devName.includes('Tesla Model') || devName.includes('동행터렛') || devName.toLowerCase().includes('audio')) {
+        this.log(`⚠️ 오디오 기기 선택 감지: ${devName}`, 'warn');
+        throw new Error(
+          `선택하신 기기('${devName}')는 차량의 음악/통화용 오디오 블루투스입니다.\n` +
+          `차량 가상키 노드('S'로 시작하는 기기 또는 이름 없는 BLE 기기)를 선택해 주세요.`
+        );
+      }
+
+      if (devName.startsWith('S') || devName.startsWith('s') || devName.endsWith('C')) {
+        this.log(`[식별 성공] 테슬라 차량 컨트롤러 노드 감지: ${devName}`);
       } else {
         this.log(`선택된 기기명: ${devName}`);
       }

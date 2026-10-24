@@ -4,8 +4,8 @@
  * Screen WakeLock, 급감속 감지 로직 및 세션 서명 연동
  */
 
-import { cryptoStore } from './crypto-store.js?v=8';
-import { bleManager } from './ble-manager.js?v=8';
+import { cryptoStore } from './crypto-store.js?v=9';
+import { bleManager } from './ble-manager.js?v=9';
 import {
   buildAddKeyRequest,
   buildOpenDoorAction,
@@ -14,8 +14,9 @@ import {
   buildStopChargeAction,
   buildChargePortUnlockAction,
   buildStatusRequest,
-  bytesToHex
-} from './proto-codec.js?v=8';
+  bytesToHex,
+  computeTeslaBLEBeaconName
+} from './proto-codec.js?v=9';
 
 // iOS Bluefy / Safari WebKit 안전 에러 메시지 추출 헬퍼 [v5]
 export function formatError(err) {
@@ -714,27 +715,57 @@ class AppStateMachine {
    */
   bindDOMEvents() {
     // 1. 위저드 관련 이벤트
+    // VIN(차대번호) 실시간 BLE 비콘 이름 계산
+    const vinInput = document.getElementById('input-vin');
+    const vinResultBox = document.getElementById('vin-calc-result');
+    const vinBeaconText = document.getElementById('vin-beacon-text');
+
+    vinInput?.addEventListener('input', async (e) => {
+      const val = e.target.value.trim().toUpperCase();
+      if (val.length === 17) {
+        try {
+          const beaconName = await computeTeslaBLEBeaconName(val);
+          if (beaconName && vinBeaconText && vinResultBox) {
+            vinBeaconText.textContent = beaconName;
+            vinResultBox.style.display = 'block';
+          }
+        } catch (_) {}
+      } else {
+        if (vinResultBox) vinResultBox.style.display = 'none';
+      }
+    });
+
     document.getElementById('btn-create-key')?.addEventListener('click', async () => {
       this.triggerHaptic(40);
       await cryptoStore.generateKeyPair();
       this.updateWizardStep();
     });
 
-    document.getElementById('btn-request-pairing')?.addEventListener('click', async () => {
-      // [v5 핵심] iOS Bluefy User Gesture 보존: 그 어떤 await도 없이 첫 줄에서 바로 connect() 호출!
+    // 페어링 연결 공통 함수
+    const startPairingFlow = async (mode = 'standard') => {
       try {
-        await bleManager.connect();
+        await bleManager.connect({ mode });
         this.triggerHaptic(60);
 
-        // 연결 완료 후 캐시된 공개키로 AddKeyRequest 전송
+        // 연결 완료 후 캐시된 공개키로 공식 규격 AddKeyRequest 전송
         const pubKey = this.cachedPublicKeyRaw || cryptoStore.publicKeyRaw;
         const addKeyPacket = buildAddKeyRequest(pubKey);
         await bleManager.sendPacket(addKeyPacket, true);
         this.updateWizardStep();
       } catch (err) {
         console.error('[App] Pairing error:', err);
-        alert('BLE 스캔/연결 실패 [v6]: ' + formatError(err));
+        alert('BLE 스캔/연결 실패 [v9]:\n' + formatError(err));
       }
+    };
+
+    // 1-1. 표준 테슬라 BLE 스캔 버튼
+    document.getElementById('btn-request-pairing')?.addEventListener('click', async () => {
+      await startPairingFlow('standard');
+    });
+
+    // 1-2. 전체 기기 필터 해제 스캔 버튼 (안 뜰 때)
+    document.getElementById('btn-request-pairing-all')?.addEventListener('click', async () => {
+      await startPairingFlow('all');
     });
 
     document.getElementById('btn-confirm-registration')?.addEventListener('click', async () => {
@@ -811,13 +842,13 @@ class AppStateMachine {
 
     // 2. 미연결 화면 [차량 블루투스 연결하기] 대형 버튼
     document.getElementById('btn-hero-connect')?.addEventListener('click', async () => {
-      // [v6 핵심] iOS Bluefy/Android User Gesture 보존: 첫 줄에서 바로 connect() 호출!
+      // [v9 핵심] iOS Bluefy/Android User Gesture 보존: 첫 줄에서 바로 connect() 호출!
       try {
-        await bleManager.connect();
+        await bleManager.connect({ mode: 'standard' });
         this.triggerHaptic(80);
       } catch (err) {
         console.error('[App] Hero connect error:', err);
-        alert('BLE 스캔/연결 실패 [v6]: ' + formatError(err));
+        alert('BLE 스캔/연결 실패 [v9]:\n' + formatError(err));
       }
     });
 

@@ -24,6 +24,18 @@ export const ROLE_SERVICE = 1;
 export const ROLE_OWNER = 2;   // 공식 OWNER 권한
 export const ROLE_DRIVER = 3;  // 공식 DRIVER 권한
 
+// KeyFormFactor (vcsec.proto)
+export const KEY_FORM_FACTOR_UNKNOWN = 0;
+export const KEY_FORM_FACTOR_NFC_CARD = 1;
+export const KEY_FORM_FACTOR_IOS_DEVICE = 6;
+export const KEY_FORM_FACTOR_ANDROID_DEVICE = 7;
+export const KEY_FORM_FACTOR_CLOUD_KEY = 9;
+
+// UniversalMessage Domain (universal_message.proto)
+export const DOMAIN_BROADCAST = 0;
+export const DOMAIN_VEHICLE_SECURITY = 2;
+export const DOMAIN_INFOTAINMENT = 3;
+
 // ClosureMoveType_E (vcsec.proto)
 export const CLOSURE_MOVE_TYPE_NONE = 0;
 export const CLOSURE_MOVE_TYPE_MOVE = 1;  // Unlatch / Move
@@ -110,6 +122,26 @@ export function bytesToHex(uint8Array) {
     .join(' ');
 }
 
+/**
+ * 테슬라 차량 VIN(차대번호 17자리) 기반 BLE Local Name 계산기
+ * 공식 규격: 'S' + hex(SHA-1(VIN)[0..7]) + 'C' (총 18자리 소문자 Hex)
+ * 예: 5YJ3E1EA... -> S1a87a5a75f3df858C
+ */
+export async function computeTeslaBLEBeaconName(vin) {
+  if (!vin || typeof vin !== 'string') return '';
+  const cleanVin = vin.trim().toUpperCase();
+  if (cleanVin.length !== 17) return '';
+  const encoder = new TextEncoder();
+  const vinBytes = encoder.encode(cleanVin);
+  const hashBuffer = await crypto.subtle.digest('SHA-1', vinBytes);
+  const hashBytes = new Uint8Array(hashBuffer);
+  let hex = '';
+  for (let i = 0; i < 8; i++) {
+    hex += hashBytes[i].toString(16).padStart(2, '0');
+  }
+  return `S${hex}C`;
+}
+
 
 // Varint 디코딩 (offset부터 시작, { value, bytesRead } 반환)
 export function decodeVarint(buffer, offset = 0) {
@@ -179,18 +211,46 @@ export function wrapToVCSECMessage(signedMessageBytes) {
 }
 
 /**
- * 키 등록용 UnsignedMessage 빌더 (AddKeyRequest)
- * 공식 vcsec.proto 구조:
+ * UniversalMessage.RoutableMessage 래퍼 (최신 테슬라 펌웨어 필수 규격)
+ * - tag 6 (to_destination): Destination { tag 1 (domain): DOMAIN_VEHICLE_SECURITY (2) }
+ * - tag 10 (protobuf_message_as_bytes): payload bytes
+ * - tag 50 (request_uuid): 16바이트 랜덤 UUID
+ */
+export function wrapToRoutableMessage(payloadBytes, domain = DOMAIN_VEHICLE_SECURITY) {
+  // 1. Destination: tag 1 = domain
+  const domainField = encodeVarintField(1, domain);
+  const destField = encodeLengthDelimitedField(6, domainField);
+
+  // 2. payload: tag 10 = protobuf_message_as_bytes
+  const payloadField = encodeLengthDelimitedField(10, payloadBytes);
+
+  // 3. request_uuid: tag 50 = 16 bytes random UUID
+  const uuid = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(uuid);
+  }
+  const uuidField = encodeLengthDelimitedField(50, uuid);
+
+  return concatBytes(destField, payloadField, uuidField);
+}
+
+/**
+ * 키 등록용 AddKeyRequest 빌더
+ * 공식 teslamotors/vehicle-command/pkg/vehicle/security.go 및 vcsec.proto 규격 준수:
  * ToVCSECMessage (tag 1)
- *   SignedMessage (tag 2 = protobufMessageAsBytes, tag 3 = SIGNATURE_TYPE_NONE (0))
+ *   SignedMessage (tag 2 = protobufMessageAsBytes, tag 3 = SIGNATURE_TYPE_PRESENT_KEY (2))
  *     UnsignedMessage (tag 16 = WhitelistOperation)
- *       WhitelistOperation (tag 5 = addKeyToWhitelistAndAddPermissions)
- *         PermissionChange:
- *           tag 1 = key (PublicKey: tag 1 = PublicKeyRaw (65바이트))
- *           tag 4 = keyRole (Role: ROLE_OWNER = 2)
+ *       WhitelistOperation:
+ *         tag 5 = addKeyToWhitelistAndAddPermissions:
+ *           PermissionChange:
+ *             tag 1 = key (PublicKey: tag 1 = PublicKeyRaw (65바이트))
+ *             tag 4 = keyRole (Role: ROLE_OWNER = 2)
+ *         tag 6 = metadataForKey:
+ *           KeyMetadata:
+ *             tag 1 = keyFormFactor (KEY_FORM_FACTOR_ANDROID_DEVICE = 7 또는 IOS = 6)
  */
 export function buildAddKeyRequest(publicKeyBytes) {
-  // 1. PublicKey: tag 1 = PublicKeyRaw
+  // 1. PublicKey: tag 1 = PublicKeyRaw (65 bytes uncompressed 0x04...)
   const publicKeyMsg = encodeLengthDelimitedField(1, publicKeyBytes);
 
   // 2. PermissionChange: tag 1 = key, tag 4 = keyRole (ROLE_OWNER = 2)
@@ -198,18 +258,26 @@ export function buildAddKeyRequest(publicKeyBytes) {
   const roleField = encodeVarintField(4, ROLE_OWNER);
   const permissionChange = concatBytes(keyField, roleField);
 
-  // 3. WhitelistOperation: tag 5 = addKeyToWhitelistAndAddPermissions
-  const whitelistOp = encodeLengthDelimitedField(5, permissionChange);
+  // 3. KeyMetadata: tag 1 = keyFormFactor
+  const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+  const formFactor = isAndroid ? KEY_FORM_FACTOR_ANDROID_DEVICE : KEY_FORM_FACTOR_IOS_DEVICE;
+  const keyMetadataField = encodeLengthDelimitedField(1, encodeVarintField(1, formFactor));
 
-  // 4. UnsignedMessage: tag 16 = WhitelistOperation
+  // 4. WhitelistOperation: tag 5 = addKeyToWhitelistAndAddPermissions, tag 6 = metadataForKey
+  const permChangeField = encodeLengthDelimitedField(5, permissionChange);
+  const metadataField = encodeLengthDelimitedField(6, keyMetadataField);
+  const whitelistOp = concatBytes(permChangeField, metadataField);
+
+  // 5. UnsignedMessage: tag 16 = WhitelistOperation
   const unsignedMessage = encodeLengthDelimitedField(16, whitelistOp);
 
-  // 5. SignedMessage: tag 2 = protobufMessageAsBytes, tag 3 = SIGNATURE_TYPE_NONE (0)
+  // 6. SignedMessage: tag 2 = protobufMessageAsBytes, tag 3 = SIGNATURE_TYPE_PRESENT_KEY (2)
+  // [핵심 버그 수정]: 0(NONE) 대신 2(PRESENT_KEY)여야 차량 화면에 센터콘솔 카드키 승인 팝업이 뜸!
   const msgBytesField = encodeLengthDelimitedField(2, unsignedMessage);
-  const sigTypeField = encodeVarintField(3, SIGNATURE_TYPE_NONE);
+  const sigTypeField = encodeVarintField(3, SIGNATURE_TYPE_PRESENT_KEY);
   const signedMessage = concatBytes(msgBytesField, sigTypeField);
 
-  // 6. ToVCSECMessage: tag 1 = signedMessage
+  // 7. ToVCSECMessage: tag 1 = signedMessage
   return wrapToVCSECMessage(signedMessage);
 }
 
@@ -368,7 +436,15 @@ export function parseIncomingMessage(uint8Array) {
   };
 
   try {
-    const rootFields = parseFields(uint8Array);
+    let payloadBytes = uint8Array;
+    let rootFields = parseFields(payloadBytes);
+
+    // RoutableMessage 언래핑 검사 (tag 10: protobuf_message_as_bytes)
+    const routablePayloadField = rootFields.find(f => f.fieldNumber === 10 && f.wireType === WIRE_LENGTH_DELIMITED);
+    if (routablePayloadField && routablePayloadField.data) {
+      payloadBytes = routablePayloadField.data;
+      rootFields = parseFields(payloadBytes);
+    }
 
     for (const field of rootFields) {
       // FromVCSECMessage 분석
@@ -403,20 +479,34 @@ export function parseIncomingMessage(uint8Array) {
         }
       }
 
-      // tag 1: VehicleStatus
+      // tag 1: VehicleStatus (공식 vcsec.proto: ClosureStatuses 는 tag 1 서브메시지)
       if (field.fieldNumber === 1 && field.wireType === WIRE_LENGTH_DELIMITED) {
         const vsFields = parseFields(field.data);
         for (const vs of vsFields) {
-          // ClosureStatus (tag 2 = closureStatuses bitmask)
+          // 공식 ClosureStatuses (tag 1: submessage)
+          if (vs.fieldNumber === 1 && vs.wireType === WIRE_LENGTH_DELIMITED) {
+            const closureFields = parseFields(vs.data);
+            for (const c of closureFields) {
+              const isOpen = (c.value === 1 || c.value === 2 || c.value === 5); // OPEN or AJAR or OPENING
+              if (c.fieldNumber === 1) result.doors.df = isOpen;
+              if (c.fieldNumber === 2) result.doors.pf = isOpen;
+              if (c.fieldNumber === 3) result.doors.dr = isOpen;
+              if (c.fieldNumber === 4) result.doors.pr = isOpen;
+              if (c.fieldNumber === 5) result.doors.rt = isOpen;
+              if (c.fieldNumber === 6) result.doors.ft = isOpen;
+              if (c.fieldNumber === 7) result.doors.charge_port = isOpen;
+            }
+          }
+          // 하위 호환 fallback: ClosureStatus (tag 2 = closureStatuses bitmask)
           if (vs.fieldNumber === 2 && vs.wireType === WIRE_VARINT) {
             const mask = vs.value;
-            result.doors.df = (mask & 0x01) !== 0;
-            result.doors.pf = (mask & 0x02) !== 0;
-            result.doors.dr = (mask & 0x04) !== 0;
-            result.doors.pr = (mask & 0x08) !== 0;
-            result.doors.ft = (mask & 0x10) !== 0;
-            result.doors.rt = (mask & 0x20) !== 0;
-            result.doors.charge_port = (mask & 0x40) !== 0;
+            result.doors.df = result.doors.df || (mask & 0x01) !== 0;
+            result.doors.pf = result.doors.pf || (mask & 0x02) !== 0;
+            result.doors.dr = result.doors.dr || (mask & 0x04) !== 0;
+            result.doors.pr = result.doors.pr || (mask & 0x08) !== 0;
+            result.doors.ft = result.doors.ft || (mask & 0x10) !== 0;
+            result.doors.rt = result.doors.rt || (mask & 0x20) !== 0;
+            result.doors.charge_port = result.doors.charge_port || (mask & 0x40) !== 0;
           }
         }
       }
@@ -454,6 +544,9 @@ export function parseIncomingMessage(uint8Array) {
   } catch (err) {
     console.warn('[proto-codec] parse error:', err);
   }
+
+  return result;
+}
 
   return result;
 }
