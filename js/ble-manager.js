@@ -9,7 +9,7 @@
  * - RX: 00000213-b2d1-43f0-9b88-960cebf8b91e (From VCSEC / Notify)
  */
 
-import { parseIncomingMessage } from './proto-codec.js?v=7';
+import { parseIncomingMessage } from './proto-codec.js?v=8';
 
 export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e';
 export const TESLA_TX_CHAR_UUID = '00000212-b2d1-43f0-9b88-960cebf8b91e'; // To VCSEC (Write)
@@ -76,7 +76,7 @@ class BLEManager {
   }
 
   /**
-   * Web Bluetooth 장치 검색 및 GATT 연결 [v7: 필터링 완전 배제 및 안드로이드 GATT 133 극복]
+   * Web Bluetooth 장치 검색 및 GATT 연결 [v8: 테슬라 키 전용 S-노드 타겟 스캔]
    */
   async connect() {
     if (this.isSimulation) {
@@ -92,24 +92,43 @@ class BLEManager {
     this.updateState('connecting');
 
     try {
-      this.log('BLE 장치 검색을 시작합니다 (필터링 없이 모든 기기 즉시 검색)...');
+      this.log('테슬라 차량 가상키 노드(S로 시작하는 기기) 검색을 시작합니다...');
 
-      // [v7 핵심] 필터링 완전 배제 (acceptAllDevices: true):
-      // 차량 광고 패킷 지연 없이 주변의 모든 BLE 기기(테슬라 포함)를 0초 만에 목록에 표시
-      this.device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: [
-          TESLA_SERVICE_UUID,
-          '00000211-b2d1-43f0-9b88-960cebf8b91e'
-        ]
-      });
+      // [v8 핵심] 오디오 블루투스를 배제하고 오직 테슬라 보안 가상키 노드만 정확히 스캔
+      // Service UUID 대기 지연 없이 namePrefix만으로 즉시 0초 만에 목록에 표시
+      try {
+        this.device = await navigator.bluetooth.requestDevice({
+          filters: [
+            { namePrefix: 'S' },
+            { namePrefix: 's' }
+          ],
+          optionalServices: [
+            TESLA_SERVICE_UUID,
+            '00000211-b2d1-43f0-9b88-960cebf8b91e'
+          ]
+        });
+      } catch (scanErr) {
+        // 혹시 장치가 대소문자 다르거나 namePrefix에 걸리지 않는 경우를 위한 폴백
+        if (scanErr.name !== 'NotFoundError') {
+          console.warn('[BLEManager] Primary namePrefix filter failed, falling back...', scanErr);
+          this.device = await navigator.bluetooth.requestDevice({
+            acceptAllDevices: true,
+            optionalServices: [
+              TESLA_SERVICE_UUID,
+              '00000211-b2d1-43f0-9b88-960cebf8b91e'
+            ]
+          });
+        } else {
+          throw scanErr;
+        }
+      }
 
       const devName = this.device.name || '(이름 없는 기기)';
       this.log(`기기 선택 완료: ${devName} (${this.device.id})`);
-      if (devName.endsWith('C')) {
-        this.log(`[식별 성공] 메인 컨트롤러(C) 노드가 선택되었습니다: ${devName}`);
+      if (devName.endsWith('C') || devName.includes('C')) {
+        this.log(`[식별 성공] 메인 컨트롤러(C/CD) 노드가 선택되었습니다: ${devName}`);
       } else {
-        this.log(`[식별 안내] 선택된 기기명이 'C'로 끝나지 않습니다 (${devName}). 차량에 여러 노드가 보일 경우 끝에 'C'가 붙은 기기가 메인 컨트롤러입니다.`);
+        this.log(`선택된 기기명: ${devName}`);
       }
 
       // 기기 선택 직후 안드로이드 블루투스 스택 안정화를 위한 350ms 대기

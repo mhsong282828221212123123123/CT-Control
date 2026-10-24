@@ -1,4 +1,4 @@
-// [v7 완전 네트워크 패스스루 및 캐시 즉시 소각 Service Worker]
+// [v8 완전 네트워크 패스스루 및 캐시 즉시 소각 Service Worker]
 self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
