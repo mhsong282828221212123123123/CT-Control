@@ -1,22 +1,28 @@
 /**
  * ble-manager.js
  * Web Bluetooth GATT 통신, 2바이트 빅엔디안 길이 헤더 프레이밍,
- * MTU 청크 분할 전송 및 우선순위 큐 관리자
- * 
- * Tesla vehicle-command 공식 BLE 규격 준수:
- * - Service: 00000211-b2d1-43f0-9b88-960cebf8b91e (Short: 0x0211)
- * - TX: 00000212-b2d1-43f0-9b88-960cebf8b91e (To VCSEC / Write)
- * - RX: 00000213-b2d1-43f0-9b88-960cebf8b91e (From VCSEC / Notify)
+ * MTU 안전 청크(20B) 분할 전송 및 우선순위 큐 관리자 [v11]
+ *
+ * Tesla vehicle-command 및 yoziru/tesla-ble 공식 BLE 규격 준수:
+ * - Advertisement Service UUID (스캔 필터용): 0x1122 (00001122-0000-1000-8000-00805f9b34fb)
+ * - BLE Beacon Name 규격:
+ *   1) 구형: 'S' + SHA1(VIN)[0..7] 16자리 hex + 'C'/'R'/'D'/'P' (예: S1a87a5a75f3df858C)
+ *   2) 신형(2023+): 'Tesla ' + VIN 뒤 6자리 (예: Tesla 130307)
+ * - GATT Primary Service (연결 후 내부 서비스): 00000211-b2d1-43f0-9b88-960cebf8b91e
+ * - TX Characteristic (To Vehicle / Write): 00000212-b2d1-43f0-9b88-960cebf8b91e
+ * - RX Characteristic (From Vehicle / Notify): 00000213-b2d1-43f0-9b88-960cebf8b91e
  */
 
-import { parseIncomingMessage } from './proto-codec.js?v=10';
+import { parseIncomingMessage } from './proto-codec.js?v=11';
 
-export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e';
-export const TESLA_TX_CHAR_UUID = '00000212-b2d1-43f0-9b88-960cebf8b91e'; // To VCSEC (Write)
-export const TESLA_RX_CHAR_UUID = '00000213-b2d1-43f0-9b88-960cebf8b91e'; // From VCSEC (Notify)
+export const TESLA_ADV_SERVICE_UUID = 0x1122; // 공중 광고 패킷(ADV_IND)에 포함되는 16비트 UUID
+export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e'; // GATT 연결 후 오픈되는 서비스 UUID
+export const TESLA_TX_CHAR_UUID = '00000212-b2d1-43f0-9b88-960cebf8b91e'; // To VCSEC / CarServer (Write)
+export const TESLA_RX_CHAR_UUID = '00000213-b2d1-43f0-9b88-960cebf8b91e'; // From VCSEC / CarServer (Notify)
 
-export const CHUNK_SIZE = 240; // 안드로이드 BLE 안전 청크 바이트 크기
-
+// Web Bluetooth는 JS에서 ExchangeMTU 호출을 지원하지 않으므로,
+// teslamotors/vehicle-command 폴백 규격(DefaultMTU 23 - 3 = 20B)에 맞춰 20바이트 단위로 안전 분할 전송
+export const CHUNK_SIZE = 20;
 
 class BLEManager {
   constructor() {
@@ -30,7 +36,7 @@ class BLEManager {
     this.commandQueue = []; // Priority queue items: { payload, isPriority, resolve, reject }
     this.isProcessingQueue = false;
 
-    // 수신 패킷 버퍼 (2바이트 길이 기반 조립)
+    // 수신 패킷 버퍼 (2바이트 Big-Endian 길이 기반 조립)
     this.rxBuffer = new Uint8Array(0);
     this.expectedPacketLength = null;
 
@@ -76,7 +82,32 @@ class BLEManager {
   }
 
   /**
-   * Web Bluetooth 장치 검색 및 GATT 연결 [v9: 다중 스캔 모드 및 오디오 장치 차단]
+   * 테슬라 BLE 비콘 기기명 판별 헬퍼
+   * - 구형: S + 16 hex + C/R/D/P (18자)
+   * - 신형(2023+): "Tesla " + VIN 끝 6자리 (12자)
+   */
+  isTeslaBLEBeaconName(name) {
+    if (!name || typeof name !== 'string') return false;
+    const oldScheme = /^S[0-9a-fA-F]{16}[CRDP]?$/;
+    const newScheme = /^Tesla [A-HJ-NPR-Z0-9]{6}$/i;
+    return oldScheme.test(name) || newScheme.test(name);
+  }
+
+  /**
+   * 클래식 오디오 블루투스 판별 헬퍼
+   */
+  isClassicAudioDeviceName(name) {
+    if (!name || typeof name !== 'string') return false;
+    if (this.isTeslaBLEBeaconName(name)) return false;
+    return (
+      name.includes('Tesla Model') ||
+      name.includes('동행터렛') ||
+      name.toLowerCase().includes('audio')
+    );
+  }
+
+  /**
+   * Web Bluetooth 장치 검색 및 GATT 연결 [v11: 실제 광고 UUID 0x1122 및 신/구형 비콘 필터 적용]
    * @param {Object} options - { mode: 'standard' | 'all' }
    */
   async connect(options = {}) {
@@ -89,33 +120,35 @@ class BLEManager {
     }
 
     if (!navigator.bluetooth || typeof navigator.bluetooth.requestDevice !== 'function') {
-      throw new Error('이 브라우저는 Web Bluetooth를 지원하지 않습니다. (iOS: Bluefy 브라우저 설치 필요)');
+      throw new Error('이 브라우저는 Web Bluetooth를 지원하지 않습니다. (Android Chrome 또는 iOS Bluefy 브라우저를 사용해 주세요)');
     }
 
     this.updateState('connecting');
 
     try {
       if (mode === 'all') {
-        this.log('모든 BLE 기기를 검색합니다 (필터 해제 모드)...');
+        this.log('전체 BLE 기기 검색을 시작합니다 (필터 해제 모드)...');
         this.device = await navigator.bluetooth.requestDevice({
           acceptAllDevices: true,
           optionalServices: [
             TESLA_SERVICE_UUID,
-            TESLA_TX_CHAR_UUID,
-            TESLA_RX_CHAR_UUID
+            TESLA_ADV_SERVICE_UUID
           ]
         });
       } else {
-        this.log('테슬라 차량 전용 검색(Service UUID 0x0211 필터)을 시작합니다...');
-        // 테슬라 전용 128비트 서비스 UUID 필터링: 오디오 기기나 잡다한 기기를 자동 제외
+        this.log('테슬라 BLE 비콘 검색 시작 (광고 UUID 0x1122 / S...C / Tesla + VIN6 필터)...');
+        // [v11 핵심 수정]
+        // 00000211-...은 광고 패킷에 없으므로 절대 filters에 넣지 않고 optionalServices에만 배치!
+        // filters에는 실제 광고 패킷에 실리는 0x1122 UUID와 구형('S') 및 신형('Tesla') 프리픽스를 OR 조건으로 설정
         this.device = await navigator.bluetooth.requestDevice({
           filters: [
-            { services: [TESLA_SERVICE_UUID] }
+            { services: [TESLA_ADV_SERVICE_UUID] },
+            { namePrefix: 'S' },
+            { namePrefix: 'Tesla' }
           ],
           optionalServices: [
             TESLA_SERVICE_UUID,
-            TESLA_TX_CHAR_UUID,
-            TESLA_RX_CHAR_UUID
+            TESLA_ADV_SERVICE_UUID
           ]
         });
       }
@@ -123,17 +156,19 @@ class BLEManager {
       const devName = this.device.name || '(이름 없는 기기)';
       this.log(`기기 선택 완료: ${devName} (${this.device.id})`);
 
-      // [v9 안전 검증] 사용자가 오디오 블루투스를 선택했을 경우 즉시 안내 및 차단
-      if (devName.includes('Tesla Model') || devName.includes('동행터렛') || devName.toLowerCase().includes('audio')) {
-        this.log(`⚠️ 오디오 기기 선택 감지: ${devName}`, 'warn');
+      // 사용자가 클래식 오디오 블루투스를 선택했을 경우 안내 및 차단
+      if (this.isClassicAudioDeviceName(devName)) {
+        this.log(`⚠️ 클래식 오디오 블루투스 선택 감지: ${devName}`, 'warn');
         throw new Error(
-          `선택하신 기기('${devName}')는 차량의 음악/통화용 오디오 블루투스입니다.\n` +
-          `차량 가상키 노드('S'로 시작하는 기기 또는 이름 없는 BLE 기기)를 선택해 주세요.`
+          `선택하신 '${devName}' 기기는 음악/통화용 클래식 오디오 블루투스입니다.\n\n` +
+          `[가상키 BLE 노드가 목록에 안 보이는 이유]\n` +
+          `테슬라 차량은 최대 3개의 BLE 연결만 허용합니다. 현재 스마트폰의 공식 Tesla 앱이나 워치/보조기기가 이미 연결되어 있으면 차량이 BLE 비콘을 숨깁니다.\n` +
+          `👉 스마트폰의 공식 Tesla 앱을 '강제 종료'하거나 폰 블루투스 설정에서 기존 차량 오디오 연결을 잠시 해제한 뒤 다시 검색해 주세요.`
         );
       }
 
-      if (devName.startsWith('S') || devName.startsWith('s') || devName.endsWith('C')) {
-        this.log(`[식별 성공] 테슬라 차량 컨트롤러 노드 감지: ${devName}`);
+      if (this.isTeslaBLEBeaconName(devName)) {
+        this.log(`[식별 성공] 테슬라 BLE 가상키 노드 확인: ${devName}`);
       } else {
         this.log(`선택된 기기명: ${devName}`);
       }
@@ -141,7 +176,7 @@ class BLEManager {
       // 기기 선택 직후 안드로이드 블루투스 스택 안정화를 위한 350ms 대기
       await new Promise((r) => setTimeout(r, 350));
 
-      // 혹시 이전 잔여 GATT 세션이 있다면 사전 disconnect
+      // 이전 잔여 GATT 세션이 있다면 사전 disconnect
       try {
         if (this.device.gatt && this.device.gatt.connected) {
           this.device.gatt.disconnect();
@@ -149,10 +184,10 @@ class BLEManager {
         }
       } catch (_) {}
 
-      // GATT 연결 끊김 핸들러 등록 (연결 완료 상태일 때만 cleanup 동작)
+      // GATT 연결 끊김 핸들러 등록
       this.device.addEventListener('gattserverdisconnected', () => {
         if (this.connectionState !== 'connected') {
-          return; // 재시도 루프 중의 disconnect() 호출은 무시
+          return;
         }
         this.log('GATT 서버 연결이 해제되었습니다.', 'warn');
         this.cleanup();
@@ -167,7 +202,6 @@ class BLEManager {
         try {
           this.log(`Connecting to GATT Server (${this.device.name || this.device.id})... (시도 ${attempt}/${MAX_RETRIES})`);
 
-          // 안드로이드 행 방지를 위한 8초 타임아웃
           const connectPromise = this.device.gatt.connect();
           const timeoutPromise = new Promise((_, reject) =>
             setTimeout(() => reject(new Error('GATT 연결 시도 타임아웃 (8초)')), 8000)
@@ -179,7 +213,6 @@ class BLEManager {
         } catch (gattErr) {
           this.log(`GATT 연결 실패 (${attempt}/${MAX_RETRIES}): ${gattErr?.message || gattErr}`, 'warn');
 
-          // 세션 정리 (disconnect 호출)
           try {
             if (this.device.gatt) {
               this.device.gatt.disconnect();
@@ -189,9 +222,8 @@ class BLEManager {
           }
 
           if (attempt < MAX_RETRIES) {
-            this.log(`GATT 연결 재시도 (${attempt}/4)...`);
-            // 안드로이드 네이티브 스택 쿨다운 (점진적 백오프)
-            const backoffMs = 600 + (attempt * 200);
+            this.log(`GATT 연결 재시도 (${attempt}/${MAX_RETRIES})...`);
+            const backoffMs = 600 + (attempt * 250);
             await new Promise((r) => setTimeout(r, backoffMs));
           } else {
             this.log(`GATT 연결 최대 재시도(${MAX_RETRIES}회) 초과 실패: ${gattErr?.message || gattErr}`, 'error');
@@ -201,24 +233,23 @@ class BLEManager {
       }
 
       this.server = connectedServer;
-      // 서비스 디스커버리 안정화를 위한 200ms 대기
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 250));
 
-      this.log('Getting Tesla Primary Service...');
+      this.log('Getting Tesla Primary Service (0x0211)...');
       this.service = await this.server.getPrimaryService(TESLA_SERVICE_UUID);
 
-      this.log('Getting TX and RX Characteristics...');
+      this.log('Getting TX (0x0212) and RX (0x0213) Characteristics...');
       this.txChar = await this.service.getCharacteristic(TESLA_TX_CHAR_UUID);
       this.rxChar = await this.service.getCharacteristic(TESLA_RX_CHAR_UUID);
 
-      // Start Notifications for RX
+      // RX 알림(Notification / Indication) 활성화
       await this.rxChar.startNotifications();
       this.rxChar.addEventListener('characteristicvaluechanged', (event) => {
         this.handleIncomingChunk(event.target.value);
       });
 
       this.updateState('connected');
-      this.log(`차량 BLE 보안 세션 연결 완료: ${this.device.name}`);
+      this.log(`차량 BLE GATT 채널 연결 완료: ${this.device.name || this.device.id}`);
       return true;
     } catch (error) {
       this.log(`Connection error: ${error?.message || error}`, 'error');
@@ -228,37 +259,35 @@ class BLEManager {
     }
   }
 
-
-
-
   /**
    * 수신된 BLE 청크 조립 (2바이트 Big-Endian 길이 헤더)
    */
   handleIncomingChunk(dataView) {
     const chunk = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
 
-    // 버퍼에 누적
+    // 1바이트 이상의 유효 청크 누적
     const newBuffer = new Uint8Array(this.rxBuffer.length + chunk.length);
     newBuffer.set(this.rxBuffer, 0);
     newBuffer.set(chunk, this.rxBuffer.length);
     this.rxBuffer = newBuffer;
 
-    // 패킷 완성 검사 루프
     while (this.rxBuffer.length >= 2) {
       if (this.expectedPacketLength === null) {
-        // 첫 2바이트 빅엔디안 길이 추출
         this.expectedPacketLength = (this.rxBuffer[0] << 8) | this.rxBuffer[1];
+        // 비정상적인 길이 헤더 방어 (최대 4096바이트 초과 시 버퍼 리셋)
+        if (this.expectedPacketLength === 0 || this.expectedPacketLength > 4096) {
+          this.rxBuffer = this.rxBuffer.slice(2);
+          this.expectedPacketLength = null;
+          continue;
+        }
       }
 
       const totalRequired = 2 + this.expectedPacketLength;
       if (this.rxBuffer.length >= totalRequired) {
-        // 완전한 패킷 추출
         const fullPayload = this.rxBuffer.slice(2, totalRequired);
-        // 버퍼 슬라이스 갱신
         this.rxBuffer = this.rxBuffer.slice(totalRequired);
         this.expectedPacketLength = null;
 
-        // Protobuf 파싱 및 콜백 실행
         const parsed = parseIncomingMessage(fullPayload);
         if (this.onRxCallback) {
           this.onRxCallback(fullPayload, parsed);
@@ -267,7 +296,6 @@ class BLEManager {
           this.onMessageCallback(parsed, fullPayload);
         }
       } else {
-        // 추가 청크 대기
         break;
       }
     }
@@ -277,11 +305,12 @@ class BLEManager {
    * 시뮬레이션용 수신 인젝터
    */
   injectSimulatedMessage(data) {
+    const wrapped = { telemetry: data };
     if (this.onRxCallback) {
-      this.onRxCallback(new Uint8Array([0x08, 0x01]), data);
+      this.onRxCallback(new Uint8Array([0x08, 0x01]), wrapped);
     }
     if (this.onMessageCallback) {
-      this.onMessageCallback(data, new Uint8Array(0));
+      this.onMessageCallback(wrapped, new Uint8Array(0));
     }
   }
 
@@ -298,7 +327,6 @@ class BLEManager {
       return true;
     }
 
-
     if (this.connectionState !== 'connected' || !this.txChar) {
       throw new Error('BLE 차량에 연결되어 있지 않습니다.');
     }
@@ -312,10 +340,8 @@ class BLEManager {
       };
 
       if (isPriority) {
-        // 긴급 제어 명령: 큐 최우선 배치 (Unshift)
         this.commandQueue.unshift(item);
       } else {
-        // 일반 상태 조회: 큐 뒤에 추가 (Push)
         this.commandQueue.push(item);
       }
 
@@ -340,19 +366,17 @@ class BLEManager {
         console.error('[BLEManager] Transmission failed:', err);
         task.reject(err);
       }
-      // 청크 간 안정적 전송 간격 보장
-      await new Promise(r => setTimeout(r, 20));
+      await new Promise((r) => setTimeout(r, 25));
     }
 
     this.isProcessingQueue = false;
   }
 
   /**
-   * 2바이트 빅엔디안 헤더 부착 및 240바이트 청크 분할 송신
+   * 2바이트 빅엔디안 헤더 부착 및 안전 MTU(20바이트) 청크 분할 송신
    */
   async transmitFramedPacket(payloadBytes) {
     const len = payloadBytes.length;
-    // 2바이트 빅엔디안 프리픽스 프레이밍
     const framed = new Uint8Array(2 + len);
     framed[0] = (len >> 8) & 0xff;
     framed[1] = len & 0xff;
@@ -361,29 +385,27 @@ class BLEManager {
     let offset = 0;
     while (offset < framed.length) {
       const chunk = framed.slice(offset, offset + CHUNK_SIZE);
-      // iOS Bluefy / 구형 WebKit 호환을 위한 writeValue 폴백
       if (typeof this.txChar.writeValueWithResponse === 'function') {
         await this.txChar.writeValueWithResponse(chunk);
-      } else if (typeof this.txChar.writeValueWithoutResponse === 'function') {
-        await this.txChar.writeValueWithoutResponse(chunk);
       } else if (typeof this.txChar.writeValue === 'function') {
         await this.txChar.writeValue(chunk);
+      } else if (typeof this.txChar.writeValueWithoutResponse === 'function') {
+        await this.txChar.writeValueWithoutResponse(chunk);
       } else {
         throw new Error('GATT 특성에 write 메서드가 존재하지 않습니다.');
       }
       offset += CHUNK_SIZE;
       if (offset < framed.length) {
-        await new Promise(r => setTimeout(r, 15)); // 청크간 짧은 딜레이
+        await new Promise((r) => setTimeout(r, 12));
       }
     }
-
   }
 
   /**
    * 연결 해제 및 리소스 정리
    */
   disconnect() {
-    if (this.device && this.device.gatt.connected) {
+    if (this.device && this.device.gatt && this.device.gatt.connected) {
       this.device.gatt.disconnect();
     }
     this.cleanup();
