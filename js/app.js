@@ -4,8 +4,8 @@
  * Screen WakeLock, 급감속 감지 로직 및 세션 서명 연동
  */
 
-import { cryptoStore } from './crypto-store.js?v=9';
-import { bleManager } from './ble-manager.js?v=9';
+import { cryptoStore } from './crypto-store.js?v=10';
+import { bleManager } from './ble-manager.js?v=10';
 import {
   buildAddKeyRequest,
   buildOpenDoorAction,
@@ -16,7 +16,7 @@ import {
   buildStatusRequest,
   bytesToHex,
   computeTeslaBLEBeaconName
-} from './proto-codec.js?v=9';
+} from './proto-codec.js?v=10';
 
 // iOS Bluefy / Safari WebKit 안전 에러 메시지 추출 헬퍼 [v5]
 export function formatError(err) {

@@ -9,7 +9,7 @@
  * - RX: 00000213-b2d1-43f0-9b88-960cebf8b91e (From VCSEC / Notify)
  */
 
-import { parseIncomingMessage } from './proto-codec.js?v=9';
+import { parseIncomingMessage } from './proto-codec.js?v=10';
 
 export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e';
 export const TESLA_TX_CHAR_UUID = '00000212-b2d1-43f0-9b88-960cebf8b91e'; // To VCSEC (Write)
@@ -101,37 +101,23 @@ class BLEManager {
           acceptAllDevices: true,
           optionalServices: [
             TESLA_SERVICE_UUID,
-            '00000211-b2d1-43f0-9b88-960cebf8b91e'
+            TESLA_TX_CHAR_UUID,
+            TESLA_RX_CHAR_UUID
           ]
         });
       } else {
-        this.log('테슬라 표준 스캔(Service UUID 0x0211 + S-Prefix)을 시작합니다...');
-        // [v9 표준 스캔]: 안드로이드 SCAN_RSP 및 ADV_IND를 모두 포괄하는 OR 필터
-        try {
-          this.device = await navigator.bluetooth.requestDevice({
-            filters: [
-              { services: [TESLA_SERVICE_UUID] },
-              { namePrefix: 'S' },
-              { namePrefix: 's' }
-            ],
-            optionalServices: [
-              TESLA_SERVICE_UUID,
-              '00000211-b2d1-43f0-9b88-960cebf8b91e'
-            ]
-          });
-        } catch (filterErr) {
-          if (filterErr.name === 'NotFoundError') {
-            throw filterErr;
-          }
-          console.warn('[BLEManager] Primary standard filter error, trying fallback...', filterErr);
-          this.device = await navigator.bluetooth.requestDevice({
-            acceptAllDevices: true,
-            optionalServices: [
-              TESLA_SERVICE_UUID,
-              '00000211-b2d1-43f0-9b88-960cebf8b91e'
-            ]
-          });
-        }
+        this.log('테슬라 차량 전용 검색(Service UUID 0x0211 필터)을 시작합니다...');
+        // 테슬라 전용 128비트 서비스 UUID 필터링: 오디오 기기나 잡다한 기기를 자동 제외
+        this.device = await navigator.bluetooth.requestDevice({
+          filters: [
+            { services: [TESLA_SERVICE_UUID] }
+          ],
+          optionalServices: [
+            TESLA_SERVICE_UUID,
+            TESLA_TX_CHAR_UUID,
+            TESLA_RX_CHAR_UUID
+          ]
+        });
       }
 
       const devName = this.device.name || '(이름 없는 기기)';
