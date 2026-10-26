@@ -69,9 +69,12 @@ class AppStateMachine {
     this.pollTickCount = 0;
 
     // 공식 SDK 규격: BLE MTU(1024B) 초과 방지를 위해 GetVehicleData는 1회당 1개 카테고리만 순환 요청
+    // 고속도로 주행 중 속도 변화(5초 이내 90->10km/h 미만)를 놓치지 않도록 DriveState 비중을 최우선 배치
     this.vehicleDataCategories = [
       VEHICLE_DATA_DRIVE_STATE,
+      VEHICLE_DATA_DRIVE_STATE,
       VEHICLE_DATA_CHARGE_STATE,
+      VEHICLE_DATA_DRIVE_STATE,
       VEHICLE_DATA_DRIVE_STATE,
       VEHICLE_DATA_CLIMATE_STATE,
       VEHICLE_DATA_DRIVE_STATE,
@@ -833,24 +836,36 @@ class AppStateMachine {
     }
   }
 
+  /**
+   * 고속도로 정체구간 급감속 감지 알고리즘:
+   * 최근 5초(5000ms) 이내에 시속 90km/h 이상으로 주행하다가
+   * 현재 속도가 10km/h 미만으로 떨어진 경우 비상등 점멸 자동 발동
+   */
   detectRapidDeceleration(currentSpeed) {
     if (!this.autoHazardEnabled || typeof currentSpeed !== 'number') return;
 
     const now = Date.now();
     this.speedHistory.push({ speed: currentSpeed, timestamp: now });
-    this.speedHistory = this.speedHistory.filter((item) => now - item.timestamp <= 1500);
+    // 최근 5.5초(5500ms) 동안의 속도 이력 유지
+    this.speedHistory = this.speedHistory.filter((item) => now - item.timestamp <= 5500);
 
     if (this.speedHistory.length < 2) return;
 
-    const baseline = this.speedHistory.find((item) => {
-      const dt = now - item.timestamp;
-      return dt >= 300 && dt <= 700;
-    });
+    // 현재 속도가 10km/h 미만으로 떨어졌을 때, 최근 5초(5000ms) 이내에 90km/h 이상이었던 기록이 있는지 확인
+    if (currentSpeed < 10) {
+      const highSpeedEntry = this.speedHistory.find((item) => {
+        const dt = now - item.timestamp;
+        return dt <= 5000 && item.speed >= 90;
+      });
 
-    if (baseline && baseline.speed >= 40) {
-      const drop = baseline.speed - currentSpeed;
-      if (drop >= 15) {
+      if (highSpeedEntry) {
         if (now - this.lastHazardTriggerTime >= this.HAZARD_COOLDOWN_MS) {
+          const elapsedSec = ((now - highSpeedEntry.timestamp) / 1000).toFixed(1);
+          this.logPacket(
+            'WARN',
+            null,
+            `🚨 [고속도로 정체 급감속 감지] ${highSpeedEntry.speed}km/h → ${currentSpeed}km/h (${elapsedSec}초 내 감속)! 비상등 자동 발동`
+          );
           this.lastHazardTriggerTime = now;
           this.triggerAutoHazardFlash();
         }
@@ -859,22 +874,7 @@ class AppStateMachine {
   }
 
   setupMotionFallback() {
-    if (window.DeviceMotionEvent) {
-      window.addEventListener('devicemotion', (event) => {
-        if (!this.autoHazardEnabled) return;
-        const acc = event.accelerationIncludingGravity || event.acceleration;
-        if (!acc) return;
-
-        const forwardG = acc.y;
-        if (forwardG && forwardG < -7.8) {
-          const now = Date.now();
-          if (now - this.lastHazardTriggerTime >= this.HAZARD_COOLDOWN_MS) {
-            this.lastHazardTriggerTime = now;
-            this.triggerAutoHazardFlash();
-          }
-        }
-      });
-    }
+    // 속도 데이터 기반(5초 내 90km/h 이상 -> 10km/h 미만)으로 일원화하여 휴대폰 거치 흔들림 오작동 방지
   }
 
   async triggerAutoHazardFlash() {
@@ -1430,7 +1430,7 @@ class AppStateMachine {
       modal.classList.remove('active');
       bleManager.updateState('connected');
       bleManager.injectSimulatedMessage({
-        speed: 60,
+        speed: 95,
         gear: 'D',
         power: -45,
         battery_level: 74,
@@ -1438,13 +1438,13 @@ class AppStateMachine {
       });
       setTimeout(() => {
         bleManager.injectSimulatedMessage({
-          speed: 10,
+          speed: 8,
           gear: 'D',
           power: -80,
           battery_level: 74,
           charging_state: 'Disconnected'
         });
-      }, 400);
+      }, 1200);
     });
 
     document.getElementById('btn-sim-charging')?.addEventListener('click', () => {
