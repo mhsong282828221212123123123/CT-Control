@@ -9,7 +9,8 @@
  * 2) 데스크톱 Chrome / iOS Bluefy 용 Web Bluetooth API 폴백
  */
 
-import { parseIncomingMessage, bytesToHex } from './proto-codec.js?v=12';
+import { parseIncomingMessageAsync, bytesToHex } from './proto-codec.js?v=13';
+import { cryptoStore } from './crypto-store.js?v=13';
 
 export const TESLA_ADV_SERVICE_UUID = 0x1122; // 공중 광고 패킷(SCAN_RSP)에 포함되는 16비트 UUID
 export const TESLA_SERVICE_UUID = '00000211-b2d1-43f0-9b88-960cebf8b91e'; // GATT 연결 후 오픈되는 서비스 UUID
@@ -566,13 +567,19 @@ class BLEManager {
         this.rxBuffer = this.rxBuffer.slice(totalRequired);
         this.expectedPacketLength = null;
 
-        const parsed = parseIncomingMessage(fullPayload);
-        if (this.onRxCallback) {
-          this.onRxCallback(fullPayload, parsed);
-        }
-        if (this.onMessageCallback) {
-          this.onMessageCallback(parsed, fullPayload);
-        }
+        const payloadCopy = fullPayload.slice();
+        parseIncomingMessageAsync(payloadCopy, cryptoStore)
+          .then((parsed) => {
+            if (this.onRxCallback) {
+              this.onRxCallback(payloadCopy, parsed);
+            }
+            if (this.onMessageCallback) {
+              this.onMessageCallback(parsed, payloadCopy);
+            }
+          })
+          .catch((err) => {
+            console.warn('[BLEManager] Async parse error:', err);
+          });
       } else {
         break;
       }

@@ -1,11 +1,12 @@
 /**
  * crypto-store.js
- * Tesla vehicle-command 및 yoziru/tesla-ble 공식 암호화 규격 구현 [v11]:
+ * Tesla vehicle-command 및 yoziru/tesla-ble 공식 암호화 규격 구현 [v13]:
  * - Web Crypto API ECDH P-256 키 쌍 생성 및 JWK/IndexedDB 영구 저장
  * - KeyId 계산: SHA-1(uncompressed_public_key_65B)[0..3]
  * - 세션 공유키 유도: K = SHA-1(ECDH_P256(client_priv, vehicle_pub))[0..15] (128-bit AES 키)
- * - 명령 암호화: AES-128-GCM (12-byte random nonce, 16-byte GCM tag, SHA-256(TLV Metadata) AAD)
- * - 도메인별(VCSEC=2, INFOTAINMENT=3) 독립 세션(epoch, clock_time, counter, vehiclePublicKey) 관리
+ * - 요청 암호화: AES-128-GCM (12B nonce, 16B tag, SHA-256(TLV Request Metadata) AAD)
+ * - 응답 복호화: AES-128-GCM (AES_GCM_Response_Signature_Data, SHA-256(TLV Response Metadata) AAD)
+ * - 도메인별(VCSEC=2, INFOTAINMENT=3) 독립 세션 및 화이트리스트 상태 관리
  */
 
 const DB_NAME = 'TeslaBLEKeyDB';
@@ -21,11 +22,21 @@ const TAG_EXPIRES_AT = 0x04;
 const TAG_COUNTER = 0x05;
 const TAG_CHALLENGE = 0x06;
 const TAG_FLAGS = 0x07;
+const TAG_REQUEST_HASH = 0x08;
+const TAG_FAULT = 0x09;
 const TAG_END = 0xff;
 
 // Signatures.SignatureType (signatures.proto)
 export const SIG_TYPE_AES_GCM = 0;
 export const SIG_TYPE_AES_GCM_PERSONALIZED = 5;
+export const SIG_TYPE_HMAC = 6;
+export const SIG_TYPE_HMAC_PERSONALIZED = 8;
+export const SIG_TYPE_AES_GCM_RESPONSE = 9;
+
+// UniversalMessage.Flags (universal_message.proto)
+export const FLAG_USER_COMMAND = 0;
+export const FLAG_ENCRYPT_RESPONSE = 1;
+export const DEFAULT_REQUEST_FLAGS = (1 << FLAG_ENCRYPT_RESPONSE); // 2
 
 class CryptoStore {
   constructor() {
@@ -36,6 +47,7 @@ class CryptoStore {
     this.isRegistered = false;
     this.vin = '';            // 17-character VIN (TLV TAG_PERSONALIZATION 용)
     this.sessionCounter = 0;
+    this.keyConfirmedOnVehicle = null; // null: 확인전, true: 차량 화이트리스트 확인됨, false: 미등록 확인됨
 
     // 클라이언트 라우팅 주소 (16바이트 랜덤 고정값)
     this.routingAddress = new Uint8Array(16);
@@ -54,13 +66,17 @@ class CryptoStore {
     return {
       domain,
       ready: false,
+      status: 0,             // 0: OK, 1: KEY_NOT_ON_WHITELIST
       counter: 0,
       epoch: null,           // Uint8Array(16)
       publicKey: null,       // Uint8Array(65)
       clockTime: 0,          // uint32 seconds
-      syncedAtMs: 0,         // performance/Date timestamp when clockTime was synced
+      syncedAtMs: 0,         // timestamp when clockTime was synced
       sharedSecretSha1: null,// Uint8Array(16) AES-128 key raw bytes
-      aesKey: null           // CryptoKey (AES-GCM 128-bit)
+      aesKey: null,          // CryptoKey (AES-GCM 128-bit)
+      useEncryptResponse: true,
+      lastRequestHash: null, // Uint8Array(17): [0x05, ...16B GCM tag]
+      requestHashesByUuid: new Map() // uuidHex -> Uint8Array(17)
     };
   }
 
@@ -116,7 +132,54 @@ class CryptoStore {
   }
 
   /**
-   * 저장된 키 쌍 및 등록 상태 로드 (기존 ECDSA JWK도 ECDH P-256으로 자동 마이그레이션)
+   * 입력된 17자리 VIN이 연결된 차량 비콘 이름(S<16hex>C 또는 Tesla <6자리>)과 일치하는지 검증
+   */
+  async verifyVinWithDeviceName(vinStr, deviceName) {
+    const cleanVin = (vinStr || '').trim().toUpperCase();
+    if (cleanVin.length !== 17) {
+      return { validLength: false, matched: false, computedBeacon: '', reason: '17자리가 아닙니다.' };
+    }
+
+    const vinBytes = new TextEncoder().encode(cleanVin);
+    const hashBuf = await window.crypto.subtle.digest('SHA-1', vinBytes);
+    const hashBytes = new Uint8Array(hashBuf);
+    let hex8 = '';
+    for (let i = 0; i < 8; i++) {
+      hex8 += hashBytes[i].toString(16).padStart(2, '0');
+    }
+    const computedBeacon = `S${hex8}C`;
+
+    if (!deviceName || typeof deviceName !== 'string') {
+      return { validLength: true, matched: null, computedBeacon };
+    }
+
+    const sMatch = deviceName.match(/^S([0-9a-fA-F]{16})[CRDP]?$/);
+    if (sMatch) {
+      const deviceHex = sMatch[1].toLowerCase();
+      return {
+        validLength: true,
+        matched: deviceHex === hex8.toLowerCase(),
+        computedBeacon,
+        deviceBeacon: deviceName
+      };
+    }
+
+    const tMatch = deviceName.match(/^Tesla\s+([A-HJ-NPR-Z0-9]{6})$/i);
+    if (tMatch) {
+      const last6 = tMatch[1].toUpperCase();
+      return {
+        validLength: true,
+        matched: cleanVin.slice(-6) === last6,
+        computedBeacon,
+        deviceBeacon: deviceName
+      };
+    }
+
+    return { validLength: true, matched: null, computedBeacon, deviceBeacon: deviceName };
+  }
+
+  /**
+   * 저장된 키 쌍 및 등록 상태 로드
    */
   async loadStoredKey() {
     return new Promise((resolve, reject) => {
@@ -144,7 +207,6 @@ class CryptoStore {
           let pubKey = null;
           let privKey = null;
 
-          // JWK가 존재하면 항상 ECDH P-256 용도로 import (구버전 ECDSA 키도 동일 P-256 곡선이므로 호환 복원됨)
           if (record.publicKeyJwk && record.privateKeyJwk && subtle) {
             const cleanPubJwk = { ...record.publicKeyJwk };
             delete cleanPubJwk.key_ops;
@@ -233,6 +295,7 @@ class CryptoStore {
     this.publicKeyRaw = publicKeyRaw;
     this.keyId = keyId;
     this.isRegistered = false;
+    this.keyConfirmedOnVehicle = null;
     this.sessionCounter = 1;
     this.resetSessions();
 
@@ -277,19 +340,41 @@ class CryptoStore {
   resetSessions() {
     this.sessions[2] = this.createEmptySession(2);
     this.sessions[3] = this.createEmptySession(3);
+    this.keyConfirmedOnVehicle = null;
   }
 
   hasValidSession(domain) {
     const s = this.sessions[domain];
-    return !!(s && s.ready && s.aesKey && s.epoch);
+    return !!(s && s.ready && s.status === 0 && s.aesKey && s.epoch);
   }
 
   /**
-   * 차량으로부터 수신한 SessionInfo(publicKey, epoch, clock_time, counter)로
+   * 차량의 WhitelistInfo(4바이트 KeyId 배열)에 현재 앱의 keyId가 존재하는지 확인
+   */
+  checkWhitelistEntries(keyIdList) {
+    if (!this.keyId || !Array.isArray(keyIdList)) return false;
+    for (const entry of keyIdList) {
+      if (entry && entry.length === 4) {
+        if (
+          entry[0] === this.keyId[0] &&
+          entry[1] === this.keyId[1] &&
+          entry[2] === this.keyId[2] &&
+          entry[3] === this.keyId[3]
+        ) {
+          this.keyConfirmedOnVehicle = true;
+          return true;
+        }
+      }
+    }
+    if (keyIdList.length > 0) {
+      this.keyConfirmedOnVehicle = false;
+    }
+    return false;
+  }
+
+  /**
+   * 차량으로부터 수신한 SessionInfo(publicKey, epoch, clock_time, counter, status)로
    * ECDH 공유 비밀키 유도 및 AES-128-GCM 세션 키 설정
-   * 공식 규격 (teslamotors/vehicle-command & yoziru/tesla-ble):
-   *   SharedSecret = ECDH_P256(client_priv, vehicle_pub) (32B X좌표)
-   *   AES_Key_16B  = SHA1(SharedSecret)[0..15]
    */
   async updateSessionInfo(domain, sessionInfo) {
     if (!this.keyPair || !this.keyPair.privateKey) {
@@ -299,9 +384,19 @@ class CryptoStore {
     const session = this.sessions[domain] || this.createEmptySession(domain);
     const subtle = window.crypto.subtle;
 
+    session.status = typeof sessionInfo.status === 'number' ? sessionInfo.status : 0;
+
+    // status === 1 (SESSION_INFO_STATUS_KEY_NOT_ON_WHITELIST)
+    if (session.status === 1) {
+      session.ready = false;
+      this.keyConfirmedOnVehicle = false;
+      this.sessions[domain] = session;
+      console.warn(`[CryptoStore] Domain ${domain} reported KEY_NOT_ON_WHITELIST (status=1)`);
+      return session;
+    }
+
     if (sessionInfo.publicKey && sessionInfo.publicKey.length >= 64) {
       let pubBytes = sessionInfo.publicKey;
-      // 만약 64바이트(X||Y)로 왔다면 앞에 0x04(Uncompressed point prefix) 부착
       if (pubBytes.length === 64) {
         const prefixed = new Uint8Array(65);
         prefixed[0] = 0x04;
@@ -318,14 +413,12 @@ class CryptoStore {
           []
         );
 
-        // ECDH 256-bit (32-byte) 공유 비밀키 유도
         const sharedBits = await subtle.deriveBits(
           { name: 'ECDH', public: vehiclePubKey },
           this.keyPair.privateKey,
           256
         );
 
-        // SHA-1 해시 후 앞 16바이트를 AES-128-GCM 대칭키로 사용
         const sha1Hash = await subtle.digest('SHA-1', sharedBits);
         const aesKeyBytes = new Uint8Array(sha1Hash).slice(0, 16);
 
@@ -358,17 +451,20 @@ class CryptoStore {
       await this.updateRecordField('sessionCounter', this.sessionCounter);
     }
 
-    session.ready = !!(session.aesKey && session.epoch && session.epoch.length > 0);
+    session.ready = !!(session.status === 0 && session.aesKey && session.epoch && session.epoch.length > 0);
+    if (session.ready) {
+      this.keyConfirmedOnVehicle = true;
+    }
     this.sessions[domain] = session;
 
     console.log(
-      `[CryptoStore] Session updated for domain ${domain}: ready=${session.ready}, counter=${session.counter}, clock=${session.clockTime}`
+      `[CryptoStore] Session updated for domain ${domain}: ready=${session.ready}, status=${session.status}, counter=${session.counter}, clock=${session.clockTime}`
     );
     return session;
   }
 
   /**
-   * TLV 메타데이터 버퍼(AD Buffer) 생성 및 SHA-256 해시 반환 (yoziru/tesla-ble peer.cpp 동일 규격)
+   * 요청용 TLV 메타데이터 버퍼(AD Buffer) 생성 및 SHA-256 해시 반환 (peer.go extractMetadata 동일 규격)
    */
   async computeMetadataHash(domain, expiresAt, counter, flags = 0) {
     const session = this.sessions[domain];
@@ -415,7 +511,7 @@ class CryptoStore {
       appendTlv(TAG_FLAGS, writeUint32BE(flags));
     }
 
-    // 8. TAG_END (0xFF) - 1바이트 종료 마커
+    // 8. TAG_END (0xFF)
     parts.push(new Uint8Array([TAG_END]));
 
     const totalLen = parts.reduce((acc, p) => acc + p.length, 0);
@@ -431,24 +527,82 @@ class CryptoStore {
   }
 
   /**
-   * 도메인 세션 키로 페이로드 AES-128-GCM 암호화 수행
-   * 반환: { ciphertext, nonce, counter, expiresAt, epoch, tag }
+   * 응답 복호화용 TLV 메타데이터 버퍼(responseMetadata) 생성 및 SHA-256 해시 반환 (peer.go responseMetadata 동일 규격)
    */
-  async encryptPayload(domain, plaintextBytes, flags = 0) {
-    const session = this.sessions[domain];
-    if (!session || !session.ready || !session.aesKey) {
-      throw new Error(`도메인(${domain}) 보안 세션이 아직 수립되지 않았습니다. 잠시 후 다시 시도해 주세요.`);
+  async computeResponseMetadataHash(domain, counter, flags, requestHashBytes, signedMessageFault = 0) {
+    const parts = [];
+
+    const appendTlv = (tag, valueBytes) => {
+      const len = valueBytes ? valueBytes.length : 0;
+      const entry = new Uint8Array(2 + len);
+      entry[0] = tag & 0xff;
+      entry[1] = len & 0xff;
+      if (len > 0) {
+        entry.set(valueBytes, 2);
+      }
+      parts.push(entry);
+    };
+
+    const writeUint32BE = (val) => {
+      const buf = new Uint8Array(4);
+      new DataView(buf.buffer).setUint32(0, val >>> 0, false);
+      return buf;
+    };
+
+    // 1. TAG_SIGNATURE_TYPE (0x00) = SIGNATURE_TYPE_AES_GCM_RESPONSE (9)
+    appendTlv(TAG_SIGNATURE_TYPE, new Uint8Array([SIG_TYPE_AES_GCM_RESPONSE]));
+
+    // 2. TAG_DOMAIN (0x01) = from_destination.domain (2 or 3)
+    appendTlv(TAG_DOMAIN, new Uint8Array([domain & 0xff]));
+
+    // 3. TAG_PERSONALIZATION (0x02) = VIN (17 bytes ASCII)
+    const vinBytes = new TextEncoder().encode((this.vin || '').slice(0, 17));
+    appendTlv(TAG_PERSONALIZATION, vinBytes);
+
+    // 4. TAG_COUNTER (0x05) = 4-byte Big-Endian response counter
+    appendTlv(TAG_COUNTER, writeUint32BE(counter));
+
+    // 5. TAG_FLAGS (0x07) = 4-byte Big-Endian message.Flags (항상 포함)
+    appendTlv(TAG_FLAGS, writeUint32BE(flags >>> 0));
+
+    // 6. TAG_REQUEST_HASH (0x08) = 17-byte request_hash (0x05 + 16B request GCM tag)
+    appendTlv(TAG_REQUEST_HASH, requestHashBytes || new Uint8Array(17));
+
+    // 7. TAG_FAULT (0x09) = 4-byte Big-Endian signed_message_fault
+    appendTlv(TAG_FAULT, writeUint32BE(signedMessageFault >>> 0));
+
+    // 8. TAG_END (0xFF)
+    parts.push(new Uint8Array([TAG_END]));
+
+    const totalLen = parts.reduce((acc, p) => acc + p.length, 0);
+    const adBuffer = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const p of parts) {
+      adBuffer.set(p, offset);
+      offset += p.length;
     }
 
-    // 카운터 1 증가
+    const hashBuf = await window.crypto.subtle.digest('SHA-256', adBuffer);
+    return new Uint8Array(hashBuf);
+  }
+
+  /**
+   * 도메인 세션 키로 요청 페이로드 AES-128-GCM 암호화 수행
+   */
+  async encryptPayload(domain, plaintextBytes, flags = DEFAULT_REQUEST_FLAGS, requestUuidHex = '') {
+    const session = this.sessions[domain];
+    if (!session || !session.ready || !session.aesKey) {
+      throw new Error(`도메인(${domain}) 보안 세션이 아직 수립되지 않았습니다.`);
+    }
+
     session.counter += 1;
     this.sessionCounter = Math.max(this.sessionCounter, session.counter);
     await this.updateRecordField('sessionCounter', this.sessionCounter);
 
     const counter = session.counter;
     const elapsedSec = session.syncedAtMs > 0 ? Math.floor((Date.now() - session.syncedAtMs) / 1000) : 0;
-    // 만료 시간: 차량 시계 기준 +10초 여유
-    const expiresAt = (session.clockTime + Math.max(0, elapsedSec) + 10) >>> 0;
+    // 만료 시간: 차량 시계 기준 +15초 여유
+    const expiresAt = (session.clockTime + Math.max(0, elapsedSec) + 15) >>> 0;
 
     // AAD = SHA-256(TLV Metadata)
     const aadHash = await this.computeMetadataHash(domain, expiresAt, counter, flags);
@@ -457,7 +611,7 @@ class CryptoStore {
     const nonce = new Uint8Array(12);
     window.crypto.getRandomValues(nonce);
 
-    // Web Crypto AES-128-GCM 암호화 (출력 끝에 16바이트 GCM Auth Tag가 붙음)
+    // Web Crypto AES-128-GCM 암호화
     const encryptedBuffer = await window.crypto.subtle.encrypt(
       {
         name: 'AES-GCM',
@@ -473,14 +627,84 @@ class CryptoStore {
     const ciphertext = encryptedBytes.slice(0, encryptedBytes.length - 16);
     const tag = encryptedBytes.slice(encryptedBytes.length - 16);
 
+    // 응답 복호화 시 필요한 17바이트 RequestHash = [0x05, ...16B tag] 저장 (peer.go RequestID 동일 규격)
+    const reqHash = new Uint8Array(17);
+    reqHash[0] = SIG_TYPE_AES_GCM_PERSONALIZED;
+    reqHash.set(tag, 1);
+    session.lastRequestHash = reqHash;
+
+    if (requestUuidHex) {
+      session.requestHashesByUuid.set(requestUuidHex, reqHash);
+      if (session.requestHashesByUuid.size > 24) {
+        const oldestKey = session.requestHashesByUuid.keys().next().value;
+        session.requestHashesByUuid.delete(oldestKey);
+      }
+    }
+
     return {
       ciphertext,
       nonce,
       counter,
       expiresAt,
       epoch: session.epoch,
-      tag
+      tag,
+      flags
     };
+  }
+
+  /**
+   * 차량이 보낸 암호화 응답(AES_GCM_Response_Signature_Data)을 복호화하여 평문 Protobuf 바이트 반환
+   */
+  async decryptResponsePayload(
+    domain,
+    ciphertextBytes,
+    aesGcmResponseData,
+    responseFlags = 0,
+    signedMessageFault = 0,
+    requestUuidHex = ''
+  ) {
+    const session = this.sessions[domain] || this.sessions[3] || this.sessions[2];
+    if (!session || !session.aesKey) {
+      throw new Error(`도메인(${domain}) 복호화 세션 키가 없습니다.`);
+    }
+
+    const { nonce, counter, tag } = aesGcmResponseData;
+    if (!nonce || !tag || !ciphertextBytes) {
+      throw new Error('암호화된 응답의 Nonce 또는 Tag가 누락되었습니다.');
+    }
+
+    // request_uuid에 매칭되는 requestHash 우선 조회, 없으면 마지막 전송 requestHash 사용
+    let reqHash = null;
+    if (requestUuidHex && session.requestHashesByUuid.has(requestUuidHex)) {
+      reqHash = session.requestHashesByUuid.get(requestUuidHex);
+    } else {
+      reqHash = session.lastRequestHash;
+    }
+
+    const aadHash = await this.computeResponseMetadataHash(
+      domain,
+      counter || 0,
+      responseFlags || 0,
+      reqHash,
+      signedMessageFault || 0
+    );
+
+    const combined = new Uint8Array(ciphertextBytes.length + tag.length);
+    combined.set(ciphertextBytes, 0);
+    combined.set(tag, ciphertextBytes.length);
+
+    const decryptedBuffer = await window.crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: nonce,
+        additionalData: aadHash,
+        tagLength: 128
+      },
+      session.aesKey,
+      combined
+    );
+
+    return new Uint8Array(decryptedBuffer);
   }
 
   /**
@@ -567,6 +791,7 @@ class CryptoStore {
         this.publicKeyRaw = null;
         this.keyId = null;
         this.isRegistered = false;
+        this.keyConfirmedOnVehicle = null;
         this.sessionCounter = 0;
         this.resetSessions();
         console.log('[CryptoStore] All keys and registration data cleared.');

@@ -3,18 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v12]</title>
-  <link rel="manifest" href="./manifest.json?v=12">
+  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v13]</title>
+  <link rel="manifest" href="./manifest.json?v=13">
   <meta name="theme-color" content="#0d0d0d">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <script>
-    // [v12 캐시 파쇄] Service Worker 등록 강제 해제 및 Web Cache 강제 소각
+    // [v13 캐시 파쇄] Service Worker 등록 강제 해제 및 Web Cache 강제 소각
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs) {
         for (var i = 0; i < regs.length; i++) {
           regs[i].unregister();
-          console.log('[v12] Unregistered old SW:', regs[i]);
         }
       });
     }
@@ -24,7 +23,7 @@
       });
     }
   </script>
-  <link rel="stylesheet" href="./style.css?v=12">
+  <link rel="stylesheet" href="./style.css?v=13">
 </head>
 <body>
 
@@ -37,20 +36,20 @@
       <div id="brand-logo" class="brand-logo" title="5초간 길게 누르면 데모 모드 활성화">
         <span>TESLA</span>
         <span class="brand-badge">CT</span>
-        <span id="build-version-badge" style="color:#00ff88; font-weight:bold; margin-left:10px;">[BUILD v12]</span>
+        <span id="build-version-badge" class="version-pill">v13</span>
       </div>
       <div id="connection-indicator" class="connection-indicator">
         <span class="status-dot">🔴</span>
-        <span id="connection-text">차량 연결 끊김</span>
+        <span id="connection-text">미연결</span>
       </div>
     </div>
 
     <div class="header-right">
+      <div id="badge-gear" class="mini-badge gear" style="display: none;">P</div>
+      <div id="badge-battery" class="mini-badge battery" style="display: none;">--%</div>
       <button id="btn-header-debug" class="header-debug-btn" title="실시간 BLE 디버그 로그 열기">
         🐞 로그 <span id="header-log-count" class="header-log-badge">0</span>
       </button>
-      <div id="badge-gear" class="mini-badge gear" style="display: none;">P</div>
-      <div id="badge-battery" class="mini-badge battery" style="display: none;">--%</div>
     </div>
   </header>
 
@@ -82,61 +81,47 @@
 
         <!-- Step 1 Body -->
         <div id="wizard-step-1" class="wizard-step-body">
-          <div style="font-size: 48px;">🔑</div>
-          <p>브라우저 보안 저장소에 전용 ECDH P-256 키 쌍을 안전하게 생성하고 있습니다...</p>
+          <div style="font-size: 44px;">🔑</div>
+          <p style="font-size: 13px; color: var(--text-secondary);">브라우저 보안 저장소에 전용 ECDH P-256 키 쌍을 안전하게 생성하고 있습니다...</p>
           <button id="btn-create-key" class="btn-primary" style="display: none;">키 다시 생성</button>
         </div>
 
         <!-- Step 2 Body -->
         <div id="wizard-step-2" class="wizard-step-body" style="display: none;">
-          <div style="font-size: 48px;">📡</div>
-          <p style="font-weight: 700; color: #fff;">차량 BLE 비콘 검색 및 연결</p>
+          <div style="font-size: 42px;">📡</div>
+          <p style="font-weight: 700; color: #fff; font-size: 15px;">차량 BLE 비콘 검색 및 연결</p>
 
-          <!-- [v12] 웹 브라우저 접속 시에만 노출되는 안드로이드 전용 APK 설치 배너 -->
-          <div class="apk-only-web-banner" style="background: rgba(0, 230, 118, 0.14); border: 2px solid #00e676; border-radius: 12px; padding: 14px; margin-bottom: 12px; text-align: left; width: 100%; box-sizing: border-box;">
-            <div style="font-size: 14px; font-weight: 800; color: #00ff88; margin-bottom: 6px;">
+          <!-- 웹 브라우저 접속 시에만 노출되는 안드로이드 전용 APK 설치 배너 -->
+          <div class="apk-only-web-banner" style="background: rgba(0, 230, 118, 0.14); border: 2px solid #00e676; border-radius: 12px; padding: 12px; text-align: left; width: 100%;">
+            <div style="font-size: 13px; font-weight: 800; color: #00ff88; margin-bottom: 6px;">
               📲 안드로이드 전용 앱(APK) 설치 (iBeacon 차단 우회)
             </div>
             <div style="font-size: 12px; color: #f5f5f7; line-height: 1.5; margin-bottom: 10px;">
-              Android 12+의 Chrome 브라우저는 OS 보안 정책(<code>neverForLocation</code>) 때문에 테슬라의 iBeacon(<code>0x004C</code> / <code>S...C</code>) 신호를 차단합니다.<br>
-              아래 버튼을 눌러 <strong>전용 안드로이드 앱(APK)</strong>을 설치해 실행하면 차단 없이 차량 신호를 즉시 감지합니다.
+              Android 12+ Chrome 브라우저는 OS 보안 정책(<code>neverForLocation</code>) 때문에 테슬라의 iBeacon(<code>S...C</code>) 신호를 차단합니다. 전용 앱(APK)으로 실행하세요.
             </div>
-            <a href="./CT-Control.apk" download="CT-Control.apk" style="display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 12px; border-radius: 8px; background: #00e676; color: #000; font-size: 14px; font-weight: 800; text-decoration: none; box-sizing: border-box;">
+            <a href="./CT-Control.apk" download="CT-Control.apk" style="display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 11px; border-radius: 8px; background: #00e676; color: #000; font-size: 13px; font-weight: 800; text-decoration: none;">
               ⬇️ CT-Control.apk 다운로드 및 설치
             </a>
           </div>
 
           <!-- BLE 연결 제한(최대 3개) 및 비콘 표시 안내 -->
-          <div style="background: rgba(232, 33, 39, 0.12); border: 1px solid rgba(232, 33, 39, 0.4); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; text-align: left; width: 100%; box-sizing: border-box;">
-            <div style="font-size: 13px; font-weight: 800; color: #ff5252; margin-bottom: 6px;">
+          <div style="background: rgba(232, 33, 39, 0.12); border: 1px solid rgba(232, 33, 39, 0.4); border-radius: 10px; padding: 11px 12px; text-align: left; width: 100%;">
+            <div style="font-size: 12px; font-weight: 800; color: #ff5252; margin-bottom: 4px;">
               🚨 스캔 전 필수 확인 (위치/GPS ON &amp; 슬롯 3개 제한)
             </div>
-            <div style="font-size: 12px; color: #f5f5f7; line-height: 1.55;">
-              • 안드로이드 상단바의 <strong>위치(GPS)</strong>가 반드시 켜져 있어야 테슬라 iBeacon 패킷이 수신됩니다.<br>
-              • 테슬라 차량은 동시에 <strong>최대 3개의 BLE 기기</strong>만 연결할 수 있으므로, 연결이 안 될 때는 메인폰의 <strong>공식 Tesla 앱을 강제 종료</strong>해 주세요.
+            <div style="font-size: 11.5px; color: #f5f5f7; line-height: 1.5;">
+              • 휴대폰 상단바의 <strong>위치(GPS)</strong>가 켜져 있어야 테슬라 비콘이 수신됩니다.<br>
+              • 동시 연결 제한(최대 3개) 초과 시 메인폰의 <strong>Tesla 앱을 잠시 종료</strong>해 주세요.
             </div>
-          </div>
-
-          <div style="background: rgba(0, 229, 255, 0.08); border: 1px solid rgba(0, 229, 255, 0.3); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; text-align: left; font-size: 11px; line-height: 1.5; color: #b2ebf2; width: 100%; box-sizing: border-box;">
-            💡 <strong>차량 BLE 감지 기준 (3중 자동 감지):</strong><br>
-            • 테슬라 고정 iBeacon: <code>74278bda-b644-4520-8f0c-720eaf059935</code><br>
-            • 비콘 이름 / UUID: <code>S...C</code> / <code>Tesla + 6자리</code> / <code>0x1122</code><br>
-            <span style="color: #ffcc00;">※ 음악/통화용 오디오(<code>Tesla Model 3 ...</code>)는 선택하지 마세요.</span>
           </div>
 
           <!-- 2가지 스캔 모드 버튼 -->
           <div style="display: flex; flex-direction: column; gap: 8px; width: 100%;">
-            <button id="btn-request-pairing" class="btn-primary" style="width: 100%; min-height: 52px; font-size: 15px; font-weight: 700;">
-              🚗 테슬라 BLE 검색 (iBeacon / 0x1122 / S...C)
+            <button id="btn-request-pairing" class="btn-primary" style="width: 100%; min-height: 50px; font-size: 14px; font-weight: 700;">
+              🚗 테슬라 BLE 검색 및 연결
             </button>
-            <button id="btn-request-pairing-all" class="btn-secondary" style="width: 100%; padding: 10px; font-size: 12px; border-color: rgba(255,255,255,0.2);">
-              🔍 전체 기기 검색 (주변 모든 BLE 패킷 보기)
-            </button>
-          </div>
-
-          <div style="text-align: center; margin-top: 10px;">
-            <button id="btn-open-debug-wizard" style="background: transparent; border: 1px dashed rgba(255,255,255,0.25); border-radius: 8px; color: var(--text-secondary); font-size: 12px; padding: 6px 12px; cursor: pointer;">
-              🐞 실시간 BLE 디버그 로그 확인
+            <button id="btn-request-pairing-all" class="btn-secondary" style="width: 100%; padding: 10px; font-size: 12px;">
+              🔍 전체 기기 검색 (주변 모든 BLE 보기)
             </button>
           </div>
         </div>
@@ -144,27 +129,28 @@
         <!-- Step 3 Body -->
         <div id="wizard-step-3" class="wizard-step-body" style="display: none;">
           <div class="nfc-animation-box">💳</div>
-          <p style="font-size: 15px; font-weight: 700; color: #fff;">
+          <p style="font-size: 15px; font-weight: 700; color: #fff; line-height: 1.4;">
             지금 센터콘솔 컵홀더 뒤편에<br>실물 NFC 카드키를 태그하세요!
           </p>
-          <div style="background: rgba(255, 204, 0, 0.12); border: 1px solid rgba(255, 204, 0, 0.35); border-radius: 8px; padding: 10px 12px; margin: 8px 0; text-align: left; font-size: 12px; line-height: 1.5; color: #ffe082;">
-            ⚠️ <strong>중요:</strong> 테슬라 차량은 <strong>NFC 카드키를 리더기에 먼저 태그하기 전까지는 화면에 아무런 팝업도 띄우지 않습니다.</strong><br>
-            카드를 태그하면 차량 모니터에 키 추가 확인 창이 나타나며, 화면에서 승인을 누르면 자동으로 등록이 완료됩니다.
+          <div id="wizard-step3-status" style="background: rgba(0, 229, 255, 0.1); border: 1px solid rgba(0, 229, 255, 0.35); border-radius: 8px; padding: 10px 12px; text-align: left; font-size: 12px; line-height: 1.5; color: #b2ebf2; width: 100%;">
+            📡 <strong>차량에 키 등록 요청 전송 완료!</strong><br>
+            1) 센터콘솔에 <strong>NFC 카드키를 태그</strong>하면 차량 화면에 키 추가 팝업이 뜹니다.<br>
+            2) 차량 모니터에서 <strong>[승인/확인]</strong>을 누르면 앱이 자동으로 감지하여 넘어갑니다.
           </div>
-          <div style="display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 6px;">
-            <button id="btn-resend-addkey" class="btn-secondary" style="width: 100%; padding: 10px; font-size: 13px;">
+          <div style="display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 4px;">
+            <button id="btn-resend-addkey" class="btn-secondary" style="width: 100%; padding: 11px; font-size: 13px;">
               🔄 키 등록 요청 패킷 다시 보내기
             </button>
-            <button id="btn-confirm-registration" class="btn-primary">
-              차량 화면에서 승인 완료됨 (수동 진행)
+            <button id="btn-confirm-registration" class="btn-primary" style="width: 100%;">
+              차량 화면에서 승인 완료됨 (메인 화면 이동)
             </button>
           </div>
         </div>
 
         <!-- 하단 키 초기화 링크 -->
-        <div style="text-align: center; margin-top: 10px;">
+        <div style="text-align: center; margin-top: 4px;">
           <button id="btn-reset-key" class="btn-secondary" style="font-size: 11px; padding: 6px 12px; background: transparent; border: none; color: var(--text-muted);">
-            키 데이터 초기화 및 재시작
+            키 데이터 초기화 및 처음부터 다시 시작
           </button>
         </div>
       </div>
@@ -174,31 +160,29 @@
     <section id="view-disconnected" class="view-section">
       <div class="disconnected-container">
         <div class="disconnected-hero-icon">🚗</div>
-        <div>
-          <h2 style="font-size: 22px; font-weight: 800; margin-bottom: 8px;">차량에 연결되지 않음</h2>
-          <p style="font-size: 14px; color: var(--text-secondary);">
+        <div style="width: 100%; max-width: 360px;">
+          <h2 style="font-size: 20px; font-weight: 800; margin-bottom: 6px;">차량에 연결되지 않음</h2>
+          <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.4;">
             차량 근처에서 아래 버튼을 눌러 BLE 보안 세션을 연결하세요.
           </p>
-          <p style="font-size: 12px; color: #ffcc00; background: rgba(255, 204, 0, 0.1); border: 1px solid rgba(255, 204, 0, 0.25); border-radius: 6px; padding: 8px 10px; margin-top: 10px; text-align: left; line-height: 1.4;">
-            💡 기기명이 <strong>S...C</strong> 또는 <strong>Tesla + 6자리</strong>인 가상키 노드를 선택하세요.
+          <p style="font-size: 12px; color: #ffcc00; background: rgba(255, 204, 0, 0.1); border: 1px solid rgba(255, 204, 0, 0.25); border-radius: 8px; padding: 8px 10px; margin-top: 10px; text-align: left; line-height: 1.45;">
+            💡 목록에서 <strong>S...C</strong> (또는 <strong>Tesla VCSEC</strong>) 기기를 선택하세요.
           </p>
         </div>
         <button id="btn-hero-connect" class="hero-connect-btn">
           <span>🔗 차량 블루투스 연결하기</span>
         </button>
-        <button id="btn-hero-connect-all" class="btn-secondary" style="width: 100%; max-width: 320px; padding: 10px; font-size: 12px; margin-top: 4px;">
-          🔍 전체 기기 검색 (안 뜰 때 필터 해제)
+        <button id="btn-hero-connect-all" class="btn-secondary" style="width: 100%; max-width: 360px; padding: 11px; font-size: 12px;">
+          🔍 전체 기기 검색 (필터 해제)
         </button>
-        <div class="apk-only-web-banner" style="width: 100%; max-width: 320px; margin-top: 8px;">
-          <a href="./CT-Control.apk" download="CT-Control.apk" style="display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 11px; border-radius: 8px; background: rgba(0, 230, 118, 0.2); border: 1px solid #00e676; color: #00ff88; font-size: 13px; font-weight: 700; text-decoration: none; box-sizing: border-box;">
+        <div class="apk-only-web-banner" style="width: 100%; max-width: 360px;">
+          <a href="./CT-Control.apk" download="CT-Control.apk" style="display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 11px; border-radius: 8px; background: rgba(0, 230, 118, 0.2); border: 1px solid #00e676; color: #00ff88; font-size: 13px; font-weight: 700; text-decoration: none;">
             📲 안드로이드 전용 앱(CT-Control.apk) 다운로드
           </a>
         </div>
-        <div style="text-align: center; margin-top: 10px;">
-          <button id="btn-open-debug-disconnected" style="background: transparent; border: 1px dashed rgba(255,255,255,0.25); border-radius: 8px; color: var(--text-secondary); font-size: 13px; padding: 7px 14px; cursor: pointer;">
-            🐞 실시간 BLE 연결 디버그 로그 보기
-          </button>
-        </div>
+        <button id="btn-disconnected-reset" class="btn-secondary" style="background: transparent; border: none; color: var(--text-muted); font-size: 11px; padding: 4px 8px;">
+          가상키 초기화 / 다시 페어링하기
+        </button>
       </div>
     </section>
 
@@ -206,14 +190,14 @@
     <section id="view-charging" class="view-section">
       <div class="charging-container">
         <div class="charging-hero-card">
-          <div style="font-size: 14px; font-weight: 700; color: var(--tesla-green); letter-spacing: 1px;">
+          <div style="font-size: 13px; font-weight: 700; color: var(--tesla-green); letter-spacing: 1px;">
             ⚡ CHARGING IN PROGRESS
           </div>
           <div id="charge-soc-text" class="charge-soc-display">--%</div>
           <div class="charge-progress-bar-bg">
             <div id="charge-progress-bar-fill" class="charge-progress-bar-fill"></div>
           </div>
-          <div style="display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary);">
+          <div style="display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary);">
             <span>목표 한도: <strong id="charge-limit-text">80%</strong></span>
             <span>남은 시간: <strong id="charge-remaining-time">--</strong></span>
           </div>
@@ -230,7 +214,7 @@
           </div>
           <div class="stat-item">
             <span class="stat-label">주행 가능 거리</span>
-            <span id="charge-stat-range" class="stat-value">0 km</span>
+            <span id="charge-stat-range" class="stat-value">-- km</span>
           </div>
           <div class="stat-item">
             <span class="stat-label">차량 온도</span>
@@ -238,12 +222,12 @@
           </div>
         </div>
 
-        <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;">
-          <button id="btn-stop-charge" class="btn-primary" style="background-color: var(--tesla-red); min-height: 54px;">
+        <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 6px;">
+          <button id="btn-stop-charge" class="btn-primary" style="background-color: var(--tesla-red); min-height: 52px;">
             ⚡ 충전 중지 및 케이블 잠금 해제
           </button>
           <button id="btn-toggle-charging-view" class="btn-secondary">
-            일반 제어/표시 화면으로 임시 전환
+            일반 제어/표시 화면으로 전환
           </button>
         </div>
       </div>
@@ -252,13 +236,52 @@
     <!-- [뷰 4: 일반/주행 화면] -->
     <section id="view-main" class="view-section">
 
+      <!-- [상단 공통 진단 & 설정 배너 영역: 키 미등록 또는 VIN 미설정 시 즉시 안내] -->
+      <div id="main-diagnostic-area" style="display: flex; flex-direction: column; gap: 10px;">
+
+        <!-- A. 차량 화이트리스트에 키가 아직 등록되지 않은 경우 -->
+        <div id="banner-key-unregistered" class="diag-banner warn" style="display: none;">
+          <div class="diag-title">⚠️ 차량에 가상키가 아직 승인되지 않았습니다</div>
+          <div class="diag-desc">
+            도어 열림/닫힘 감지는 작동하지만, 속도·배터리 표시 및 도어 개방·비상등 제어는 차량에 키가 등록되어야 작동합니다.<br>
+            아래 버튼을 누른 뒤 <strong>센터콘솔에 NFC 카드키를 태그</strong>하고 차량 화면에서 <strong>[승인]</strong>을 눌러주세요.
+          </div>
+          <button id="btn-main-send-addkey" class="btn-primary" style="width: 100%; padding: 10px; font-size: 13px; margin-top: 6px;">
+            💳 지금 차량에 키 등록 요청 보내기
+          </button>
+        </div>
+
+        <!-- B. 암호화 명령/주행데이터 인증용 17자리 차대번호(VIN)가 아직 없는 경우 -->
+        <div id="banner-vin-setup" class="diag-banner info" style="display: none;">
+          <div class="diag-title">🔐 계기판 데이터 &amp; 차량 제어 활성화 (최초 1회 VIN 등록)</div>
+          <div class="diag-desc">
+            테슬라 보안 규격(AES-128-GCM 서명)상 속도·배터리·공기압 조회 및 문 열기·비상등 명령은 <strong>차량의 17자리 차대번호(VIN)</strong>가 일치해야 차량이 응답합니다. (1회 저장 시 영구 유지)
+          </div>
+          <div style="display: flex; gap: 6px; margin-top: 8px;">
+            <input id="input-main-vin" type="text" maxlength="17" placeholder="17자리 차대번호 입력 (예: 5YJ3E...)" class="vin-input-field">
+            <button id="btn-save-main-vin" class="btn-primary" style="padding: 9px 14px; font-size: 12px; white-space: nowrap;">저장·연동</button>
+          </div>
+          <div id="main-vin-verify-text" style="font-size: 11px; margin-top: 5px; color: #b2ebf2;"></div>
+        </div>
+
+        <!-- C. 실시간 보안 세션 상태 요약 바 -->
+        <div id="banner-session-bar" class="session-status-bar">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span id="status-vcsec-pill" class="session-pill">VCSEC: 대기</span>
+            <span id="status-info-pill" class="session-pill">계기판: 대기</span>
+          </div>
+          <button id="btn-resync-session" class="btn-mini-sync">🔄 재동기화</button>
+        </div>
+
+      </div>
+
       <!-- [4.1 표시 탭 내용] -->
-      <div id="tab-content-display" style="display: flex; flex-direction: column; gap: 14px;">
+      <div id="tab-content-display" style="display: flex; flex-direction: column; gap: 12px;">
         
         <!-- 메인 클러스터 카드 -->
         <div class="cluster-card card">
           <div class="gear-selector">
-            <span class="gear-item" data-gear="P">P</span>
+            <span class="gear-item active" data-gear="P">P</span>
             <span class="gear-item" data-gear="R">R</span>
             <span class="gear-item" data-gear="N">N</span>
             <span class="gear-item" data-gear="D">D</span>
@@ -273,17 +296,17 @@
             <div class="power-center-line"></div>
             <div id="power-gauge-fill" class="power-bar-fill"></div>
           </div>
-          <div style="display: flex; justify-content: space-between; width: 100%; max-width: 320px; font-size: 11px; color: var(--text-muted);">
-            <span>회생제동 (kW)</span>
+          <div style="display: flex; justify-content: space-between; width: 100%; max-width: 300px; font-size: 11px; color: var(--text-muted);">
+            <span>회생제동</span>
             <span id="power-numeric-val">0 kW</span>
-            <span>출력 (kW)</span>
+            <span>출력</span>
           </div>
         </div>
 
         <!-- 도어 & 트렁크 개폐 상태 카드 -->
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span style="font-size: 14px; font-weight: 700;">도어 및 수납공간</span>
+            <span style="font-size: 13px; font-weight: 700;">도어 및 수납공간</span>
             <span id="doors-summary-badge" class="mini-badge" style="color: var(--tesla-green);">전체 닫힘 🟢</span>
           </div>
           <div class="doors-grid">
@@ -296,45 +319,43 @@
           </div>
         </div>
 
-        <!-- 타이어 공기압 (TPMS) 카드 -->
+        <!-- 환경 & 배터리 요약 카드 -->
         <div class="card">
-          <span style="font-size: 14px; font-weight: 700;">타이어 공기압 (TPMS)</span>
-          <div class="tpms-grid">
-            <div class="tpms-item"><span>전방 좌측 (FL)</span><div id="tpms-fl" class="tpms-val">2.9 Bar</div></div>
-            <div class="tpms-item"><span>전방 우측 (FR)</span><div id="tpms-fr" class="tpms-val">2.9 Bar</div></div>
-            <div class="tpms-item"><span>후방 좌측 (RL)</span><div id="tpms-rl" class="tpms-val">2.9 Bar</div></div>
-            <div class="tpms-item"><span>후방 우측 (RR)</span><div id="tpms-rr" class="tpms-val">2.9 Bar</div></div>
+          <div class="env-battery-grid">
+            <div class="env-box">
+              <div class="env-label">실내 / 실외 온도</div>
+              <div class="env-val">
+                <span id="temp-in">--</span>°C / <span id="temp-out">--</span>°C
+              </div>
+            </div>
+            <div class="env-box">
+              <div class="env-label">배터리 / 주행거리</div>
+              <div class="env-val">
+                <span id="cluster-battery-pct">--%</span> <small style="font-size:12px; color:var(--text-secondary);">(<span id="cluster-range-km">-- km</span>)</small>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- 환경 & 배터리 요약 카드 -->
+        <!-- 타이어 공기압 (TPMS) 카드 -->
         <div class="card">
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-            <div>
-              <div style="font-size: 12px; color: var(--text-secondary);">실내 / 실외 온도</div>
-              <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">
-                <span id="temp-in">21.5</span>°C / <span id="temp-out">18.0</span>°C
-              </div>
-            </div>
-            <div>
-              <div style="font-size: 12px; color: var(--text-secondary);">배터리 / 주행거리</div>
-              <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">
-                <span id="cluster-battery-pct">--%</span> (<span id="cluster-range-km">-- km</span>)
-              </div>
-            </div>
+          <span style="font-size: 13px; font-weight: 700;">타이어 공기압 (TPMS)</span>
+          <div class="tpms-grid">
+            <div class="tpms-item"><span>전방 좌측 (FL)</span><div id="tpms-fl" class="tpms-val">-- Bar</div></div>
+            <div class="tpms-item"><span>전방 우측 (FR)</span><div id="tpms-fr" class="tpms-val">-- Bar</div></div>
+            <div class="tpms-item"><span>후방 좌측 (RL)</span><div id="tpms-rl" class="tpms-val">-- Bar</div></div>
+            <div class="tpms-item"><span>후방 우측 (RR)</span><div id="tpms-rr" class="tpms-val">-- Bar</div></div>
           </div>
         </div>
 
       </div>
 
       <!-- [4.2 제어 탭 내용] -->
-      <div id="tab-content-control" style="display: none; flex-direction: column; gap: 14px;">
+      <div id="tab-content-control" style="display: none; flex-direction: column; gap: 12px;">
         
         <!-- 급감속 비상등 자동 점멸 옵션 바 -->
         <div class="control-options-bar">
-          <span class="switch-label">
-            <span>⚡ 급감속 시 비상등 자동 점멸</span>
-          </span>
+          <span class="switch-label">⚡ 급감속 시 비상등 자동 점멸</span>
           <label class="toggle-switch">
             <input type="checkbox" id="switch-auto-hazard" checked>
             <span class="toggle-slider"></span>
@@ -348,7 +369,7 @@
 
         <!-- 도어 안전 잠금 및 강제 잠금 해제 바 -->
         <div class="door-safety-bar">
-          <span id="safety-status-msg">🔒 주행 중(D/R/N) 도어 개방 잠금</span>
+          <span id="safety-status-msg">🔓 P단 정차 상태: 개방 가능</span>
           <label class="override-checkbox-label">
             <input type="checkbox" id="chk-force-unlock">
             <span>강제 잠금 해제</span>
@@ -367,22 +388,30 @@
           </button>
           <button id="btn-unlatch-rl" class="door-tile-btn" data-door="2">
             <span class="icon">🚪</span>
-            <span>운전석 후방 문 개방</span>
+            <span>운전석 후방 개방</span>
           </button>
           <button id="btn-unlatch-rr" class="door-tile-btn" data-door="3">
             <span class="icon">🚪</span>
-            <span>조수석 후방 문 개방</span>
+            <span>조수석 후방 개방</span>
           </button>
         </div>
 
-        <!-- 최신 펌웨어 AES-GCM 명령 인증용 VIN 설정 카드 -->
-        <div class="card" style="padding: 12px;">
+        <!-- 차대번호(VIN) 및 가상키 관리 카드 -->
+        <div class="card" style="padding: 14px;">
           <div style="font-size: 12px; font-weight: 700; margin-bottom: 6px; color: var(--text-secondary);">
             🔐 암호화 명령 인증용 차대번호(VIN 17자리) 설정
           </div>
-          <div style="display: flex; gap: 8px;">
-            <input id="input-control-vin" type="text" maxlength="17" placeholder="예: 5YJ3E1EA..." style="flex: 1; background: #141418; border: 1px solid rgba(255,255,255,0.18); border-radius: 8px; padding: 8px 10px; color: #fff; font-size: 13px; text-transform: uppercase;">
-            <button id="btn-save-vin" class="btn-secondary" style="padding: 8px 14px; font-size: 12px; font-weight: 700;">저장</button>
+          <div style="display: flex; gap: 6px;">
+            <input id="input-control-vin" type="text" maxlength="17" placeholder="17자리 VIN (예: 5YJ3E1EA...)" class="vin-input-field">
+            <button id="btn-save-vin" class="btn-secondary" style="padding: 8px 14px; font-size: 12px; font-weight: 700; white-space: nowrap;">저장</button>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-subtle);">
+            <button id="btn-ctrl-send-addkey" class="btn-secondary" style="font-size: 11px; padding: 7px 10px;">
+              💳 차량에 키 등록 요청 재전송
+            </button>
+            <button id="btn-ctrl-reset-key" class="btn-secondary" style="font-size: 11px; padding: 7px 10px; color: #ff6b6b; border-color: rgba(232,33,39,0.35);">
+              🗑️ 키 초기화
+            </button>
           </div>
         </div>
 
@@ -398,11 +427,11 @@
   <nav id="bottom-nav-bar" class="bottom-nav" style="display: none;">
     <button id="tab-btn-display" class="nav-tab-btn active">
       <span class="tab-icon">📊</span>
-      <span>표시</span>
+      <span>표시 (계기판)</span>
     </button>
     <button id="tab-btn-control" class="nav-tab-btn">
       <span class="tab-icon">🕹️</span>
-      <span>제어</span>
+      <span>제어 (도어·비상등)</span>
     </button>
   </nav>
 
@@ -412,11 +441,11 @@
   <div id="demo-modal" class="demo-modal-overlay">
     <div class="demo-modal-box">
       <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h3 style="font-size: 17px; font-weight: 700;">🛠️ 시뮬레이션 / 데모 모드</h3>
+        <h3 style="font-size: 16px; font-weight: 700;">🛠️ 시뮬레이션 / 데모 모드</h3>
         <button id="btn-close-demo" class="btn-secondary" style="padding: 4px 10px; font-size: 12px;">닫기</button>
       </div>
-      <p style="font-size: 13px; color: var(--text-secondary);">
-        실제 테슬라 차량이 없는 환경에서도 PWA의 전체 상태 전환과 로직을 검증할 수 있습니다.
+      <p style="font-size: 12px; color: var(--text-secondary);">
+        실제 차량 연결 없이도 전체 UI 상태 전환과 로직을 검증할 수 있습니다.
       </p>
 
       <div class="demo-actions-grid">
@@ -429,13 +458,8 @@
   </div>
 
   <!-- ==========================================
-       5. [🐞 BLE 패킷 디버그 로그 플로팅 버튼 및 시트]
+       5. [🐞 BLE 패킷 디버그 로그 시트 (상단 헤더 버튼으로 오픈)]
        ========================================== -->
-  <button id="btn-toggle-debug" class="floating-debug-btn" title="BLE 패킷 송수신 로그 보기">
-    <span>🐞 로그</span>
-    <span id="debug-log-badge" class="badge-count">0</span>
-  </button>
-
   <div id="debug-log-sheet" class="debug-sheet-overlay">
     <div class="debug-sheet-box">
       <div class="debug-sheet-header">
@@ -443,7 +467,7 @@
           <span>🐞 BLE 패킷 실시간 디버그 로그</span>
         </div>
         <div class="debug-sheet-actions">
-          <button id="btn-copy-debug-logs" class="btn-secondary" style="font-size: 11px; padding: 5px 9px;">📋 전체 복사</button>
+          <button id="btn-copy-debug-logs" class="btn-secondary" style="font-size: 11px; padding: 5px 9px;">📋 복사</button>
           <button id="btn-clear-debug-logs" class="btn-secondary" style="font-size: 11px; padding: 5px 9px;">🧹 비우기</button>
           <button id="btn-close-debug-sheet" class="btn-secondary" style="font-size: 11px; padding: 5px 9px;">✕ 닫기</button>
         </div>
@@ -459,11 +483,11 @@
        ========================================== -->
   <div id="reset-confirm-modal" class="demo-modal-overlay">
     <div class="demo-modal-box" style="text-align: center;">
-      <div style="font-size: 40px; margin-bottom: 8px;">⚠️</div>
-      <h3 style="font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 8px;">가상키 초기화</h3>
-      <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 16px;">
-        브라우저에 저장된 테슬라 가상키와 페어링 등록 정보를 모두 삭제하시겠습니까?<br>
-        삭제 후에는 차량에서 다시 키 등록 절차를 진행해야 합니다.
+      <div style="font-size: 38px; margin-bottom: 4px;">⚠️</div>
+      <h3 style="font-size: 17px; font-weight: 700; color: #fff;">가상키 초기화</h3>
+      <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.5;">
+        저장된 테슬라 가상키와 페어링 등록 정보를 초기화하시겠습니까?<br>
+        초기화 후에는 차량에서 다시 키 등록 절차를 진행해야 합니다.
       </p>
       <div style="display: flex; gap: 10px;">
         <button id="btn-modal-cancel-reset" class="btn-secondary" style="flex: 1; padding: 12px; font-weight: 700;">취소</button>
@@ -478,7 +502,7 @@
   <div id="native-ble-modal" class="demo-modal-overlay">
     <div class="demo-modal-box" style="max-width: 440px; width: 94%; max-height: 86vh; display: flex; flex-direction: column; gap: 10px; padding: 16px;">
       <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h3 style="font-size: 16px; font-weight: 800; color: #00ff88;">📡 네이티브 BLE &amp; iBeacon 스캐너</h3>
+        <h3 style="font-size: 15px; font-weight: 800; color: #00ff88;">📡 네이티브 BLE &amp; iBeacon 스캐너</h3>
         <button id="btn-native-close-modal" class="btn-secondary" style="padding: 5px 10px; font-size: 12px;">✕ 닫기</button>
       </div>
 
@@ -507,6 +531,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/app.js?v=12"></script>
+  <script type="module" src="./js/app.js?v=13"></script>
 </body>
 </html>

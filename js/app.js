@@ -1,25 +1,30 @@
 /**
  * app.js
  * 메인 상태 머신 (State Machine), UI 바인딩,
- * ECDH + AES-128-GCM 세션 핸드셰이크, VCSEC/CarServer 폴링 및 급감속 감지 연동 [v12]
+ * ECDH + AES-128-GCM 양방향 세션 핸드셰이크, 단일 카테고리 순환 폴링 및 급감속 감지 연동 [v13]
  */
 
-import { cryptoStore } from './crypto-store.js?v=12';
-import { bleManager } from './ble-manager.js?v=12';
+import { cryptoStore } from './crypto-store.js?v=13';
+import { bleManager } from './ble-manager.js?v=13';
 import {
   DOMAIN_VEHICLE_SECURITY,
   DOMAIN_INFOTAINMENT,
+  VEHICLE_DATA_DRIVE_STATE,
+  VEHICLE_DATA_CHARGE_STATE,
+  VEHICLE_DATA_CLIMATE_STATE,
+  VEHICLE_DATA_TIRE_PRESSURE_STATE,
   buildAddKeyRequest,
+  buildRoutableAddKeyRequest,
   buildSessionInfoRequest,
   buildOpenDoorAction,
   buildFlashLightsAction,
   buildStopChargeAction,
   buildChargePortUnlockAction,
   buildStatusRequest,
+  buildWhitelistInfoRequest,
   buildGetVehicleDataRequest,
-  bytesToHex,
-  computeTeslaBLEBeaconName
-} from './proto-codec.js?v=12';
+  bytesToHex
+} from './proto-codec.js?v=13';
 
 export function formatError(err) {
   if (err === undefined) return 'undefined (User Gesture 만료 또는 스캔 권한 미허용)';
@@ -40,27 +45,41 @@ class AppStateMachine {
     this.activeTab = 'display'; // 'display' | 'control'
     this.isTempChargingBypass = false;
 
-    // 차량 텔레메트리 캐시
+    // 차량 텔레메트리 캐시 (초기 미수신 값은 null로 두어 더미값 혼동 방지)
     this.telemetry = {
       speed: 0,
       gear: 'P',
       power: 0,
       charging_state: 'Disconnected',
-      battery_level: 0,
+      battery_level: null,
       charge_limit_soc: 80,
       time_to_full_charge: 0,
       charger_power: 0,
       charger_voltage: 0,
       charger_actual_current: 0,
-      ideal_battery_range_km: 0,
-      inside_temp: 21.5,
-      outside_temp: 18.0,
-      tpms: { fl: 2.9, fr: 2.9, rl: 2.9, rr: 2.9 },
-      doors: { df: false, pf: false, dr: false, pr: false, ft: false, rt: false, charge_port: false }
+      ideal_battery_range_km: null,
+      inside_temp: null,
+      outside_temp: null,
+      tpms: { fl: null, fr: null, rl: null, rr: null },
+      doors: { df: false, pf: false, dr: false, pr: false, ft: false, rt: false, charge_port: false },
+      locked: false
     };
 
     this.vehicleSleepStatus = 1; // 1: AWAKE, 2: ASLEEP
     this.pollTickCount = 0;
+
+    // 공식 SDK 규격: BLE MTU(1024B) 초과 방지를 위해 GetVehicleData는 1회당 1개 카테고리만 순환 요청
+    this.vehicleDataCategories = [
+      VEHICLE_DATA_DRIVE_STATE,
+      VEHICLE_DATA_CHARGE_STATE,
+      VEHICLE_DATA_DRIVE_STATE,
+      VEHICLE_DATA_CLIMATE_STATE,
+      VEHICLE_DATA_DRIVE_STATE,
+      VEHICLE_DATA_TIRE_PRESSURE_STATE
+    ];
+    this.vehicleDataCategoryIdx = 0;
+    this.initialBurstSent = false;
+    this.vinMismatchDetected = false;
 
     // 급감속 감지 상태 추적기
     this.autoHazardEnabled = true;
@@ -75,7 +94,6 @@ class AppStateMachine {
     this.debugLogs = [];
     this.MAX_DEBUG_LOGS = 150;
 
-    // User Gesture 보존을 위한 사전 캐시 공개키
     this.cachedPublicKeyRaw = null;
   }
 
@@ -101,8 +119,6 @@ class AppStateMachine {
       this.debugLogs.shift();
     }
 
-    const badge = document.getElementById('debug-log-badge');
-    if (badge) badge.textContent = this.debugLogs.length;
     const headerBadge = document.getElementById('header-log-count');
     if (headerBadge) headerBadge.textContent = this.debugLogs.length;
 
@@ -118,14 +134,22 @@ class AppStateMachine {
       } else if (parsedOrSummary && typeof parsedOrSummary === 'object') {
         const parts = [];
         if (parsedOrSummary.domain) parts.push(`Dom:${parsedOrSummary.domain}`);
-        if (parsedOrSummary.whitelistOperationStatus) parts.push(`Whitelist:${parsedOrSummary.whitelistOperationStatus}`);
-        if (parsedOrSummary.sessionInfo) parts.push(`SessionInfo(cnt=${parsedOrSummary.sessionInfo.counter})`);
+        if (parsedOrSummary.decrypted) parts.push('🔓AES-Decrypted');
+        if (parsedOrSummary.decryptError) parts.push(`❌DecErr:${parsedOrSummary.decryptError}`);
+        if (parsedOrSummary.whitelistOperationStatus) parts.push(`WL:${parsedOrSummary.whitelistOperationStatus}`);
+        if (parsedOrSummary.whitelistKeyIds) parts.push(`WLKeys:${parsedOrSummary.whitelistKeyIds.length}`);
+        if (parsedOrSummary.sessionInfo) {
+          parts.push(`Session(cnt=${parsedOrSummary.sessionInfo.counter},st=${parsedOrSummary.sessionInfo.status})`);
+        }
         if (parsedOrSummary.signedMessageFault) parts.push(`Fault:${parsedOrSummary.signedMessageFault}`);
         const t = parsedOrSummary.telemetry || {};
         if (t.speed !== undefined) parts.push(`Spd:${t.speed}km/h`);
         if (t.gear) parts.push(`Gear:${t.gear}`);
-        if (t.battery_level !== undefined) parts.push(`Bat:${t.battery_level}%`);
-        if (t.doors) parts.push('DoorsUpdated');
+        if (t.battery_level !== undefined && t.battery_level !== null) parts.push(`Bat:${t.battery_level}%`);
+        if (t.doors) {
+          const openList = Object.entries(t.doors).filter(([, v]) => v).map(([k]) => k.toUpperCase());
+          parts.push(openList.length > 0 ? `DoorsOpen:${openList.join(',')}` : 'Doors:AllClosed');
+        }
         summaryText = parts.length > 0 ? parts.join(' | ') : JSON.stringify(parsedOrSummary);
       }
 
@@ -166,7 +190,7 @@ class AppStateMachine {
       const copyBtn = document.getElementById('btn-copy-debug-logs');
       if (copyBtn) {
         const originalText = copyBtn.textContent;
-        copyBtn.textContent = '✅ 복사됨!';
+        copyBtn.textContent = '✅ 복사됨';
         setTimeout(() => copyBtn.textContent = originalText, 1500);
       }
     } catch (e) {
@@ -176,8 +200,6 @@ class AppStateMachine {
 
   clearDebugLogs() {
     this.debugLogs = [];
-    const badge = document.getElementById('debug-log-badge');
-    if (badge) badge.textContent = '0';
     const headerBadge = document.getElementById('header-log-count');
     if (headerBadge) headerBadge.textContent = '0';
     const listEl = document.getElementById('debug-log-list');
@@ -188,15 +210,14 @@ class AppStateMachine {
    * 앱 초기화
    */
   async init() {
-    console.log('[App] Initializing CT-Control App [v12]...');
+    console.log('[App] Initializing CT-Control App [v13]...');
 
     this.registerServiceWorker();
 
-    // 네이티브 안드로이드 APK 환경 여부에 따른 배너/배지 처리
     if (bleManager.isNativeApp()) {
       const badgeEl = document.getElementById('build-version-badge');
       if (badgeEl) {
-        badgeEl.textContent = '[BUILD v12 · NATIVE APK]';
+        badgeEl.textContent = 'v13·APK';
       }
       document.querySelectorAll('.apk-only-web-banner').forEach((el) => {
         el.style.display = 'none';
@@ -206,11 +227,7 @@ class AppStateMachine {
     await cryptoStore.init();
     this.cachedPublicKeyRaw = cryptoStore.publicKeyRaw;
 
-    // 저장된 VIN을 제어 탭 입력창에 반영
-    const vinCtrlInput = document.getElementById('input-control-vin');
-    if (vinCtrlInput && cryptoStore.vin) {
-      vinCtrlInput.value = cryptoStore.vin;
-    }
+    this.syncVinInputs();
 
     bleManager.setCallbacks({
       onStateChange: (state) => this.handleBLEStateChange(state),
@@ -219,19 +236,21 @@ class AppStateMachine {
       onRx: (rawBytes, parsed) => this.logPacket('RX', rawBytes, parsed),
       onLog: (msg, level) => {
         this.logPacket(level === 'error' ? 'ERR' : (level === 'warn' ? 'WARN' : 'INFO'), null, msg);
-        if (bleManager.connectionState === 'connecting') {
-          const connText = document.getElementById('connection-text');
-          if (connText) {
-            connText.textContent = msg.length > 25 ? msg.substring(0, 25) + '...' : msg;
-          }
-        }
       }
     });
 
     this.bindDOMEvents();
     this.setupWakeLock();
     this.setupMotionFallback();
+    this.renderTelemetryUI();
     this.evaluateViewState();
+  }
+
+  syncVinInputs() {
+    const vinCtrlInput = document.getElementById('input-control-vin');
+    const vinMainInput = document.getElementById('input-main-vin');
+    if (vinCtrlInput && cryptoStore.vin) vinCtrlInput.value = cryptoStore.vin;
+    if (vinMainInput && cryptoStore.vin) vinMainInput.value = cryptoStore.vin;
   }
 
   registerServiceWorker() {
@@ -239,7 +258,6 @@ class AppStateMachine {
       navigator.serviceWorker.getRegistrations().then((regs) => {
         for (const reg of regs) {
           reg.unregister();
-          console.log('[v11] Unregistered SW:', reg.scope);
         }
       });
     }
@@ -252,9 +270,7 @@ class AppStateMachine {
         this.wakeLockSentinel?.addEventListener('release', () => {
           this.wakeLockSentinel = null;
         });
-      } catch (err) {
-        console.warn('[App] Wake Lock request error:', formatError(err));
-      }
+      } catch (_) {}
     }
   }
 
@@ -263,9 +279,7 @@ class AppStateMachine {
       try {
         await this.wakeLockSentinel.release();
         this.wakeLockSentinel = null;
-      } catch (err) {
-        console.warn('[App] Wake Lock release error:', formatError(err));
-      }
+      } catch (_) {}
     }
   }
 
@@ -304,6 +318,7 @@ class AppStateMachine {
     }
 
     this.switchView('main');
+    this.updateDiagnosticBanners();
   }
 
   switchView(viewName) {
@@ -332,25 +347,102 @@ class AppStateMachine {
   }
 
   /**
+   * 메인 화면 상단 진단 배너 (키 화이트리스트 등록 여부, VIN 설정 여부, 세션 상태) 갱신
+   */
+  async updateDiagnosticBanners() {
+    const keyBanner = document.getElementById('banner-key-unregistered');
+    const vinBanner = document.getElementById('banner-vin-setup');
+    const vcsecPill = document.getElementById('status-vcsec-pill');
+    const infoPill = document.getElementById('status-info-pill');
+    const vinVerifyText = document.getElementById('main-vin-verify-text');
+
+    const vcsecReady = cryptoStore.hasValidSession(DOMAIN_VEHICLE_SECURITY);
+    const infoReady = cryptoStore.hasValidSession(DOMAIN_INFOTAINMENT);
+    const keyNotWhitelisted = (
+      cryptoStore.keyConfirmedOnVehicle === false ||
+      cryptoStore.sessions[2]?.status === 1 ||
+      cryptoStore.sessions[3]?.status === 1
+    );
+
+    if (keyBanner) {
+      keyBanner.style.display = keyNotWhitelisted ? 'flex' : 'none';
+    }
+
+    const needVin = !cryptoStore.vin || cryptoStore.vin.length !== 17 || this.vinMismatchDetected;
+    if (vinBanner) {
+      vinBanner.style.display = needVin ? 'flex' : 'none';
+    }
+
+    if (cryptoStore.vin && cryptoStore.vin.length === 17 && bleManager.device?.name) {
+      const check = await cryptoStore.verifyVinWithDeviceName(cryptoStore.vin, bleManager.device.name);
+      if (check.matched === false) {
+        this.vinMismatchDetected = true;
+        if (vinBanner) vinBanner.style.display = 'flex';
+        if (vinVerifyText) {
+          vinVerifyText.style.color = '#ff6b6b';
+          vinVerifyText.textContent = `⚠️ 입력된 VIN의 비콘명(${check.computedBeacon})이 현재 연결된 차량(${check.deviceBeacon})과 다릅니다.`;
+        }
+      } else if (check.matched === true && vinVerifyText) {
+        vinVerifyText.style.color = '#00ff88';
+        vinVerifyText.textContent = `✅ 연결된 차량(${check.deviceBeacon})과 차대번호가 일치합니다.`;
+      }
+    }
+
+    if (vcsecPill) {
+      if (keyNotWhitelisted) {
+        vcsecPill.className = 'session-pill warn';
+        vcsecPill.textContent = 'VCSEC: ⚠️ 키 미등록';
+      } else if (vcsecReady) {
+        vcsecPill.className = 'session-pill ok';
+        vcsecPill.textContent = 'VCSEC(제어): 🟢 활성';
+      } else {
+        vcsecPill.className = 'session-pill';
+        vcsecPill.textContent = 'VCSEC(제어): 🟡 연결중';
+      }
+    }
+
+    if (infoPill) {
+      if (this.vehicleSleepStatus === 2) {
+        infoPill.className = 'session-pill warn';
+        infoPill.textContent = '계기판: 💤 차량 절전중';
+      } else if (infoReady && !needVin) {
+        infoPill.className = 'session-pill ok';
+        infoPill.textContent = '계기판(데이터): 🟢 수신중';
+      } else if (needVin) {
+        infoPill.className = 'session-pill warn';
+        infoPill.textContent = '계기판: ⚠️ VIN 필요';
+      } else {
+        infoPill.className = 'session-pill';
+        infoPill.textContent = '계기판: 🟡 핸드셰이크중';
+      }
+    }
+  }
+
+  /**
    * BLE 연결 상태 변경 시 ECDH 세션 핸드셰이크 및 폴링 시작
    */
   handleBLEStateChange(state) {
     const indicator = document.getElementById('connection-indicator');
+    this.initialBurstSent = false;
 
     if (state === 'connected') {
-      indicator.innerHTML = '<span class="status-dot">🟢</span><span id="connection-text">차량 연결됨</span>';
+      if (indicator) {
+        indicator.innerHTML = '<span class="status-dot">🟢</span><span id="connection-text">연결됨</span>';
+      }
       this.requestWakeLock();
 
-      // 등록 완료된 키가 있으면 즉시 VCSEC & Infotainment ECDH 세션 핸드셰이크 수행
-      if (cryptoStore.isRegistered && cryptoStore.publicKeyRaw) {
-        this.initiateSessionHandshake();
-      }
+      // 연결 즉시 VCSEC 상태 조회 + 화이트리스트 확인 + ECDH 세션 핸드셰이크 수행
+      this.initiateSessionHandshake();
       this.startTelemetryPolling();
     } else if (state === 'connecting') {
-      indicator.innerHTML = '<span class="status-dot">🟡</span><span id="connection-text">보안 세션 연결 중...</span>';
+      if (indicator) {
+        indicator.innerHTML = '<span class="status-dot">🟡</span><span id="connection-text">연결중...</span>';
+      }
       this.stopTelemetryPolling();
     } else {
-      indicator.innerHTML = '<span class="status-dot">🔴</span><span id="connection-text">차량 연결 끊김</span>';
+      if (indicator) {
+        indicator.innerHTML = '<span class="status-dot">🔴</span><span id="connection-text">미연결</span>';
+      }
       cryptoStore.resetSessions();
       this.releaseWakeLock();
       this.stopTelemetryPolling();
@@ -360,12 +452,26 @@ class AppStateMachine {
   }
 
   /**
-   * VCSEC(도메인 2) 및 Infotainment(도메인 3)에 SessionInfoRequest 전송
+   * VCSEC(도메인 2) 및 Infotainment(도메인 3)에 상태 조회 + 화이트리스트 확인 + SessionInfoRequest 전송
    */
   async initiateSessionHandshake() {
     if (bleManager.connectionState !== 'connected' || !cryptoStore.publicKeyRaw) return;
     try {
-      this.logPacket('INFO', null, '차량 ECDH 보안 세션 핸드셰이크(SessionInfoRequest) 요청 중...');
+      this.logPacket('INFO', null, '차량 상태 및 ECDH 보안 세션 핸드셰이크(VCSEC & Infotainment) 시작...');
+
+      // 1. 무인증 VCSEC 도어/슬립 상태 즉시 조회
+      const statusReq = buildStatusRequest(cryptoStore.routingAddress);
+      await bleManager.sendPacket(statusReq, false);
+
+      await new Promise((r) => setTimeout(r, 150));
+
+      // 2. 무인증 VCSEC 화이트리스트 키 목록 조회 (현재 앱의 키가 차량에 등록되어 있는지 확인)
+      const wlReq = buildWhitelistInfoRequest(cryptoStore.routingAddress);
+      await bleManager.sendPacket(wlReq, false);
+
+      await new Promise((r) => setTimeout(r, 180));
+
+      // 3. VCSEC(도메인 2) ECDH SessionInfoRequest
       const vcsecHandshake = buildSessionInfoRequest(
         cryptoStore.publicKeyRaw,
         DOMAIN_VEHICLE_SECURITY,
@@ -373,7 +479,9 @@ class AppStateMachine {
       );
       await bleManager.sendPacket(vcsecHandshake, false);
 
-      await new Promise((r) => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, 220));
+
+      // 4. Infotainment(도메인 3) ECDH SessionInfoRequest
       const infoHandshake = buildSessionInfoRequest(
         cryptoStore.publicKeyRaw,
         DOMAIN_INFOTAINMENT,
@@ -385,19 +493,69 @@ class AppStateMachine {
     }
   }
 
+  /**
+   * 차량에 키 등록 요청(AddKeyRequest) 전송 (ToVCSECMessage + RoutableMessage 이중 전송)
+   */
+  async sendAddKeyRequestToVehicle() {
+    const pubKey = this.cachedPublicKeyRaw || cryptoStore.publicKeyRaw;
+    if (!pubKey) {
+      throw new Error('가상키가 아직 생성되지 않았습니다.');
+    }
+    const rawVcsecPkt = buildAddKeyRequest(pubKey);
+    await bleManager.sendPacket(rawVcsecPkt, true);
+
+    await new Promise((r) => setTimeout(r, 220));
+    const routablePkt = buildRoutableAddKeyRequest(pubKey, cryptoStore.routingAddress);
+    await bleManager.sendPacket(routablePkt, true);
+  }
+
+  /**
+   * Infotainment 세션 수립 직후 초기 4대 카테고리(주행/배터리/온도/공기압) 연속 조회
+   */
+  async triggerInitialVehicleDataBurst() {
+    if (this.initialBurstSent) return;
+    if (!cryptoStore.hasValidSession(DOMAIN_INFOTAINMENT)) return;
+    if (!cryptoStore.vin || cryptoStore.vin.length !== 17) return;
+
+    this.initialBurstSent = true;
+    const initialCats = [
+      VEHICLE_DATA_DRIVE_STATE,
+      VEHICLE_DATA_CHARGE_STATE,
+      VEHICLE_DATA_CLIMATE_STATE,
+      VEHICLE_DATA_TIRE_PRESSURE_STATE
+    ];
+
+    for (const cat of initialCats) {
+      if (bleManager.connectionState !== 'connected' || !cryptoStore.hasValidSession(DOMAIN_INFOTAINMENT)) break;
+      try {
+        const pkt = await buildGetVehicleDataRequest(cryptoStore, cat);
+        await bleManager.sendPacket(pkt, false);
+        await new Promise((r) => setTimeout(r, 260));
+      } catch (e) {
+        console.warn('[App] Initial burst request error:', e);
+        break;
+      }
+    }
+  }
+
   updateHeaderBadges() {
     const gearBadge = document.getElementById('badge-gear');
     const batteryBadge = document.getElementById('badge-battery');
 
     if (bleManager.connectionState === 'connected') {
-      gearBadge.style.display = 'block';
-      gearBadge.textContent = this.telemetry.gear || 'P';
-
-      batteryBadge.style.display = 'block';
-      batteryBadge.textContent = `${this.telemetry.battery_level}%`;
+      if (gearBadge) {
+        gearBadge.style.display = 'block';
+        gearBadge.textContent = this.telemetry.gear || 'P';
+      }
+      if (batteryBadge) {
+        batteryBadge.style.display = 'block';
+        batteryBadge.textContent = this.telemetry.battery_level !== null
+          ? `${this.telemetry.battery_level}%`
+          : '--%';
+      }
     } else {
-      gearBadge.style.display = 'none';
-      batteryBadge.style.display = 'none';
+      if (gearBadge) gearBadge.style.display = 'none';
+      if (batteryBadge) batteryBadge.style.display = 'none';
     }
   }
 
@@ -420,7 +578,7 @@ class AppStateMachine {
 
       await cryptoStore.generateKeyPair();
       this.cachedPublicKeyRaw = cryptoStore.publicKeyRaw;
-      setTimeout(() => this.updateWizardStep(), 400);
+      setTimeout(() => this.updateWizardStep(), 350);
       return;
     }
 
@@ -441,7 +599,7 @@ class AppStateMachine {
   }
 
   /**
-   * 주기적 상태/텔레메트리 폴링 루프 (1500ms 간격 - 20B 청크 분할 전송 큐 부하 방지)
+   * 주기적 상태/텔레메트리 폴링 루프 (1300ms 간격)
    */
   startTelemetryPolling() {
     if (this.pollingTimer) return;
@@ -449,44 +607,64 @@ class AppStateMachine {
 
     this.pollingTimer = setInterval(async () => {
       if (bleManager.connectionState !== 'connected') return;
-      // 큐에 이미 패킷이 밀려 있으면 이번 틱은 건너뜀
       if (bleManager.commandQueue.length > 1) return;
 
       this.pollTickCount++;
 
       try {
-        // 1. VCSEC 도어/잠금/슬립 상태 요청 (짝수 틱 또는 미등록 시)
-        if (!cryptoStore.isRegistered || this.pollTickCount % 2 === 1) {
-          const vcsecReq = buildStatusRequest(cryptoStore.routingAddress);
-          await bleManager.sendPacket(vcsecReq, false);
+        // 1. 온보딩 Step 3 (키 등록 대기 중)일 때: 2틱마다 화이트리스트 및 세션 등록 완료 여부를 자동 확인
+        if (!cryptoStore.isRegistered) {
+          if (this.pollTickCount % 2 === 1) {
+            const wlReq = buildWhitelistInfoRequest(cryptoStore.routingAddress);
+            await bleManager.sendPacket(wlReq, false);
+          } else {
+            const siReq = buildSessionInfoRequest(
+              cryptoStore.publicKeyRaw,
+              DOMAIN_VEHICLE_SECURITY,
+              cryptoStore.routingAddress
+            );
+            await bleManager.sendPacket(siReq, false);
+          }
+          return;
         }
 
-        // 2. 키 등록 완료 상태에서 세션이 아직 없으면 4틱마다 핸드셰이크 재요청
-        if (cryptoStore.isRegistered) {
-          if (!cryptoStore.hasValidSession(DOMAIN_VEHICLE_SECURITY) && this.pollTickCount % 4 === 0) {
-            const req = buildSessionInfoRequest(cryptoStore.publicKeyRaw, DOMAIN_VEHICLE_SECURITY, cryptoStore.routingAddress);
-            await bleManager.sendPacket(req, false);
-          } else if (
-            cryptoStore.hasValidSession(DOMAIN_INFOTAINMENT) &&
-            this.vehicleSleepStatus !== 2 &&
-            this.pollTickCount % 2 === 0
-          ) {
-            // 3. 차량이 깨어있고 Infotainment 세션이 수립되어 있으면 주행/배터리/공기압 데이터 폴링
-            const vdReq = await buildGetVehicleDataRequest(cryptoStore);
-            await bleManager.sendPacket(vdReq, false);
-          } else if (
-            !cryptoStore.hasValidSession(DOMAIN_INFOTAINMENT) &&
-            this.vehicleSleepStatus !== 2 &&
-            this.pollTickCount % 4 === 2
-          ) {
-            const req = buildSessionInfoRequest(cryptoStore.publicKeyRaw, DOMAIN_INFOTAINMENT, cryptoStore.routingAddress);
-            await bleManager.sendPacket(req, false);
-          }
+        // 2. 메인 화면: 홀수 틱마다 VCSEC 도어/잠금/슬립 상태 요청 (무인증 즉시 응답)
+        if (this.pollTickCount % 2 === 1) {
+          const vcsecReq = buildStatusRequest(cryptoStore.routingAddress);
+          await bleManager.sendPacket(vcsecReq, false);
+          return;
         }
-      } catch (e) {
+
+        // 3. 짝수 틱: 세션 미수립 시 핸드셰이크 요청, 수립 완료 시 단일 카테고리 GetVehicleData 순환 요청
+        if (!cryptoStore.hasValidSession(DOMAIN_VEHICLE_SECURITY) && this.pollTickCount % 4 === 0) {
+          const req = buildSessionInfoRequest(
+            cryptoStore.publicKeyRaw,
+            DOMAIN_VEHICLE_SECURITY,
+            cryptoStore.routingAddress
+          );
+          await bleManager.sendPacket(req, false);
+        } else if (!cryptoStore.hasValidSession(DOMAIN_INFOTAINMENT) && this.vehicleSleepStatus !== 2) {
+          const req = buildSessionInfoRequest(
+            cryptoStore.publicKeyRaw,
+            DOMAIN_INFOTAINMENT,
+            cryptoStore.routingAddress
+          );
+          await bleManager.sendPacket(req, false);
+        } else if (
+          cryptoStore.hasValidSession(DOMAIN_INFOTAINMENT) &&
+          this.vehicleSleepStatus !== 2 &&
+          cryptoStore.vin &&
+          cryptoStore.vin.length === 17
+        ) {
+          const catTag = this.vehicleDataCategories[this.vehicleDataCategoryIdx % this.vehicleDataCategories.length];
+          this.vehicleDataCategoryIdx++;
+          const vdReq = await buildGetVehicleDataRequest(cryptoStore, catTag);
+          await bleManager.sendPacket(vdReq, false);
+        }
+      } catch (_) {
         // 일시적 폴링 오류 무시
       }
-    }, 1500);
+    }, 1300);
   }
 
   stopTelemetryPolling() {
@@ -497,7 +675,7 @@ class AppStateMachine {
   }
 
   /**
-   * 수신된 패킷 처리 (SessionInfo 갱신, 화이트리스트 승인 확인, 텔레메트리 병합)
+   * 수신된 패킷 처리 (SessionInfo 갱신, 화이트리스트 확인, 텔레메트리 병합)
    */
   async handleIncomingTelemetry(parsed) {
     if (!parsed) return;
@@ -507,52 +685,112 @@ class AppStateMachine {
       this.vehicleSleepStatus = parsed.vehicleSleepStatus;
     }
 
-    // 2. ECDH SessionInfo 수신 시 공유 비밀키(SHA1(ECDH)[:16]) 및 세션 정보 업데이트
+    // 2. WhitelistInfo(화이트리스트 키 목록) 수신 시 현재 앱의 keyId가 등록되었는지 자동 검증
+    if (Array.isArray(parsed.whitelistKeyIds)) {
+      const isEnrolled = cryptoStore.checkWhitelistEntries(parsed.whitelistKeyIds);
+      if (isEnrolled) {
+        this.logPacket('INFO', null, '✅ 차량 화이트리스트(WhitelistInfo)에 현재 가상키 등록이 확인되었습니다!');
+        if (!cryptoStore.isRegistered) {
+          await cryptoStore.setRegistered(true);
+          this.evaluateViewState();
+          this.initiateSessionHandshake();
+        }
+      } else if (parsed.whitelistKeyIds.length > 0) {
+        this.logPacket('WARN', null, `차량 화이트리스트(총 ${parsed.whitelistKeyIds.length}개 키)에 아직 현재 앱 키가 없습니다.`);
+      }
+      this.updateDiagnosticBanners();
+    }
+
+    // 3. ECDH SessionInfo 수신 시 공유 비밀키 유도 및 세션 상태 갱신
     if (parsed.sessionInfo) {
       const targetDomain = parsed.domain || DOMAIN_VEHICLE_SECURITY;
       try {
-        await cryptoStore.updateSessionInfo(targetDomain, parsed.sessionInfo);
-        this.logPacket(
-          'INFO',
-          null,
-          `[보안 세션 수립 완료] 도메인 ${targetDomain === 3 ? 'Infotainment(3)' : 'VCSEC(2)'} (Counter: ${parsed.sessionInfo.counter})`
-        );
+        const session = await cryptoStore.updateSessionInfo(targetDomain, parsed.sessionInfo);
+        if (session.status === 1) {
+          this.logPacket(
+            'WARN',
+            null,
+            `⚠️ 도메인(${targetDomain}) 응답: 차량 화이트리스트에 아직 키가 등록되지 않았습니다 (KEY_NOT_ON_WHITELIST).`
+          );
+        } else if (session.ready) {
+          this.logPacket(
+            'INFO',
+            null,
+            `🔐 [보안 세션 수립 완료] 도메인 ${targetDomain === 3 ? 'Infotainment(3)' : 'VCSEC(2)'} (Counter: ${session.counter})`
+          );
+          if (!cryptoStore.isRegistered) {
+            await cryptoStore.setRegistered(true);
+            this.evaluateViewState();
+          }
+          if (targetDomain === DOMAIN_INFOTAINMENT) {
+            this.triggerInitialVehicleDataBurst();
+          }
+        }
+        this.updateDiagnosticBanners();
       } catch (siErr) {
         this.logPacket('WARN', null, `세션 키 유도 실패: ${formatError(siErr)}`);
       }
     }
 
-    // 3. 차량에서 보고된 카운터 동기화
+    // 4. 차량에서 보고된 카운터 동기화
     if (parsed.reportedCounter !== null && typeof parsed.reportedCounter === 'number') {
       await cryptoStore.syncCounter(parsed.reportedCounter);
     }
 
-    // 4. 서명/메타데이터 Fault 감지 안내
+    // 5. 서명/메타데이터 Fault 감지 및 자동 복구
     if (parsed.signedMessageFault) {
-      // 12 = MESSAGEFAULT_ERROR_WRONG_PERSONALIZATION (VIN 불일치/누락)
-      if (parsed.signedMessageFault === 12) {
-        this.logPacket('WARN', null, '⚠️ 차량이 명령 인증을 위해 17자리 차대번호(VIN) 설정을 요구합니다 (제어 탭 하단에서 VIN 저장 필요).');
-      } else if (parsed.signedMessageFault === 3) {
-        this.logPacket('WARN', null, '⚠️ 차량에 현재 가상키가 등록되어 있지 않습니다 (UNKNOWN_KEY_ID).');
+      const fault = parsed.signedMessageFault;
+      const dom = parsed.domain || DOMAIN_INFOTAINMENT;
+
+      if (fault === 3) {
+        // MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID = 3
+        cryptoStore.keyConfirmedOnVehicle = false;
+        this.logPacket('WARN', null, '⚠️ 차량에 현재 가상키가 등록되어 있지 않습니다 (UNKNOWN_KEY_ID=3).');
+      } else if (fault === 5 || fault === 12) {
+        // 5 = INVALID_SIGNATURE, 12 = WRONG_PERSONALIZATION (VIN 누락 또는 불일치)
+        this.vinMismatchDetected = true;
+        this.logPacket('WARN', null, `⚠️ 차량 서명 검증 실패 (Fault=${fault}): 17자리 차대번호(VIN)가 정확한지 확인해 주세요.`);
+      } else if (fault === 20 || fault === 21) {
+        // BAD_PARAMETER: 구형 펌웨어에서 FLAG_ENCRYPT_RESPONSE 미지원 시 평문 응답 모드로 자동 전환
+        if (cryptoStore.sessions[dom] && cryptoStore.sessions[dom].useEncryptResponse) {
+          cryptoStore.sessions[dom].useEncryptResponse = false;
+          this.logPacket('INFO', null, `도메인(${dom}) 응답 암호화 플래그 비활성화(평문 호환 모드) 전환`);
+        }
+      } else if (fault === 28) {
+        // REQUIRES_RESPONSE_ENCRYPTION = 28
+        if (cryptoStore.sessions[dom]) {
+          cryptoStore.sessions[dom].useEncryptResponse = true;
+        }
+      } else if (fault === 4 || fault === 7 || fault === 15 || fault === 17) {
+        // 토큰/카운터/만료시간 오차 발생 시 세션 핸드셰이크 자동 재수행
+        this.logPacket('INFO', null, `세션 시간/카운터 재동기화 요청 (Fault=${fault})`);
+        const req = buildSessionInfoRequest(cryptoStore.publicKeyRaw, dom, cryptoStore.routingAddress);
+        bleManager.sendPacket(req, false).catch(() => {});
       }
+      this.updateDiagnosticBanners();
     }
 
-    // 5. 화이트리스트 키 등록 승인 완료 확인
+    // 6. 화이트리스트 키 등록 승인 상태 처리
     if (parsed.whitelistOperationStatus === 'OK') {
-      this.logPacket('INFO', null, '✅ 차량에서 가상키 등록(Whitelist AddKey) 승인이 확인되었습니다!');
+      this.logPacket('INFO', null, '✅ 차량에서 가상키 등록(Whitelist AddKey) 승인이 완료되었습니다!');
+      cryptoStore.keyConfirmedOnVehicle = true;
       await cryptoStore.setRegistered(true);
       this.evaluateViewState();
       this.initiateSessionHandshake();
     } else if (parsed.whitelistOperationStatus === 'WAITING_FOR_CARD') {
-      this.logPacket('INFO', null, '💳 차량이 센터콘솔 NFC 카드키 태그를 대기 중입니다 (지금 카드를 태그해 주세요).');
+      this.logPacket('INFO', null, '💳 차량이 센터콘솔 NFC 카드키 태그를 대기 중입니다! 지금 카드를 태그해 주세요.');
+      const step3Status = document.getElementById('wizard-step3-status');
+      if (step3Status) {
+        step3Status.innerHTML = '💳 <strong>차량이 NFC 카드 태그를 대기 중입니다!</strong><br>지금 센터콘솔 컵홀더 뒤편에 카드를 태그하고 차량 화면에서 [승인]을 눌러주세요.';
+      }
     } else if (parsed.whitelistOperationStatus === 'ERROR') {
-      this.logPacket('WARN', null, `⚠️ 키 등록 응답 오류 (코드: ${parsed.whitelistErrorCode ?? '알 수 없음'})`);
+      this.logPacket('WARN', null, `⚠️ 키 등록 응답 알림 (코드: ${parsed.whitelistErrorCode ?? '확인 필요'})`);
     }
 
-    // 6. 실제로 수신된 텔레메트리 필드만 안전하게 병합 (기존 값 0 초기화 방지)
+    // 7. 수신된 텔레메트리 필드 병합
     const incomingTel = parsed.telemetry || {};
     if (incomingTel.doors) {
-      Object.assign(this.telemetry.doors, incomingTel.doors);
+      this.telemetry.doors = { ...incomingTel.doors };
     }
     if (incomingTel.tpms) {
       Object.assign(this.telemetry.tpms, incomingTel.tpms);
@@ -562,7 +800,7 @@ class AppStateMachine {
       'speed', 'gear', 'power', 'charging_state', 'battery_level',
       'charge_limit_soc', 'time_to_full_charge', 'charger_power',
       'charger_voltage', 'charger_actual_current', 'ideal_battery_range_km',
-      'inside_temp', 'outside_temp'
+      'inside_temp', 'outside_temp', 'locked'
     ];
     for (const k of scalarKeys) {
       if (incomingTel[k] !== undefined && incomingTel[k] !== null) {
@@ -570,16 +808,22 @@ class AppStateMachine {
       }
     }
 
-    // 7. 급감속 감지 알고리즘 실행 (실제 속도 필드가 수신되었을 때만)
+    // 만약 인포테인먼트 텔레메트리가 정상 복호화/수신되었다면 VIN 불일치 경고 해제
+    if (parsed.decrypted) {
+      this.vinMismatchDetected = false;
+      this.updateDiagnosticBanners();
+    }
+
+    // 8. 급감속 감지 알고리즘 실행
     if (incomingTel.speed !== undefined) {
       this.detectRapidDeceleration(this.telemetry.speed);
     }
 
-    // 8. UI 갱신
+    // 9. UI 갱신
     this.renderTelemetryUI();
     this.updateHeaderBadges();
 
-    // 9. 충전 화면 전환 재평가
+    // 10. 충전 화면 전환 재평가
     const isCharging = (this.telemetry.charging_state === 'Charging' || this.telemetry.charging_state === 'Starting');
     if (isCharging && this.currentView === 'main' && !this.isTempChargingBypass) {
       this.evaluateViewState();
@@ -607,7 +851,6 @@ class AppStateMachine {
       const drop = baseline.speed - currentSpeed;
       if (drop >= 15) {
         if (now - this.lastHazardTriggerTime >= this.HAZARD_COOLDOWN_MS) {
-          console.warn(`[App] 🚨 RAPID DECELERATION DETECTED: -${drop} km/h! Triggering Hazard Lights.`);
           this.lastHazardTriggerTime = now;
           this.triggerAutoHazardFlash();
         }
@@ -654,21 +897,22 @@ class AppStateMachine {
     const t = this.telemetry;
 
     const speedEl = document.getElementById('cluster-speed-val');
-    if (speedEl) speedEl.textContent = Math.round(t.speed);
+    if (speedEl) speedEl.textContent = Math.round(t.speed || 0);
 
     const gearItems = document.querySelectorAll('.gear-item');
     gearItems.forEach((el) => {
-      el.classList.toggle('active', el.getAttribute('data-gear') === t.gear);
+      el.classList.toggle('active', el.getAttribute('data-gear') === (t.gear || 'P'));
     });
 
     const powerBar = document.getElementById('power-gauge-fill');
     const powerText = document.getElementById('power-numeric-val');
     if (powerBar && powerText) {
-      powerText.textContent = `${Math.round(t.power)} kW`;
+      const pVal = t.power || 0;
+      powerText.textContent = `${Math.round(pVal)} kW`;
       const maxPower = 100;
-      const pct = Math.min(50, Math.abs(t.power) / maxPower * 50);
+      const pct = Math.min(50, Math.abs(pVal) / maxPower * 50);
 
-      if (t.power >= 0) {
+      if (pVal >= 0) {
         powerBar.className = 'power-bar-fill power';
         powerBar.style.left = '50%';
         powerBar.style.width = `${pct}%`;
@@ -681,12 +925,12 @@ class AppStateMachine {
 
     const doors = t.doors || {};
     const doorMap = [
-      { id: 'door-pill-df', open: doors.df },
-      { id: 'door-pill-pf', open: doors.pf },
-      { id: 'door-pill-dr', open: doors.dr },
-      { id: 'door-pill-pr', open: doors.pr },
-      { id: 'door-pill-ft', open: doors.ft },
-      { id: 'door-pill-rt', open: doors.rt }
+      { id: 'door-pill-df', open: !!doors.df },
+      { id: 'door-pill-pf', open: !!doors.pf },
+      { id: 'door-pill-dr', open: !!doors.dr },
+      { id: 'door-pill-pr', open: !!doors.pr },
+      { id: 'door-pill-ft', open: !!doors.ft },
+      { id: 'door-pill-rt', open: !!doors.rt }
     ];
 
     for (const d of doorMap) {
@@ -702,10 +946,10 @@ class AppStateMachine {
     const doorsSummary = document.getElementById('doors-summary-badge');
     if (doorsSummary) {
       if (hasAnyDoorOpen) {
-        doorsSummary.textContent = '열림 ⚠️';
-        doorsSummary.style.color = '#ff6b6b';
+        doorsSummary.textContent = '열림 감지 ⚠️';
+        doorsSummary.style.color = '#ff5252';
       } else {
-        doorsSummary.textContent = '전체 닫힘 🟢';
+        doorsSummary.textContent = t.locked ? '전체 닫힘 · 잠김 🔒' : '전체 닫힘 🟢';
         doorsSummary.style.color = 'var(--tesla-green)';
       }
     }
@@ -715,20 +959,26 @@ class AppStateMachine {
       const fr = document.getElementById('tpms-fr');
       const rl = document.getElementById('tpms-rl');
       const rr = document.getElementById('tpms-rr');
-      if (fl) fl.textContent = `${t.tpms.fl} Bar`;
-      if (fr) fr.textContent = `${t.tpms.fr} Bar`;
-      if (rl) rl.textContent = `${t.tpms.rl} Bar`;
-      if (rr) rr.textContent = `${t.tpms.rr} Bar`;
+      if (fl) fl.textContent = t.tpms.fl !== null ? `${t.tpms.fl} Bar` : '-- Bar';
+      if (fr) fr.textContent = t.tpms.fr !== null ? `${t.tpms.fr} Bar` : '-- Bar';
+      if (rl) rl.textContent = t.tpms.rl !== null ? `${t.tpms.rl} Bar` : '-- Bar';
+      if (rr) rr.textContent = t.tpms.rr !== null ? `${t.tpms.rr} Bar` : '-- Bar';
     }
 
     const tempIn = document.getElementById('temp-in');
     const tempOut = document.getElementById('temp-out');
     const batPct = document.getElementById('cluster-battery-pct');
     const batRange = document.getElementById('cluster-range-km');
-    if (tempIn) tempIn.textContent = t.inside_temp;
-    if (tempOut) tempOut.textContent = t.outside_temp;
-    if (batPct) batPct.textContent = `${t.battery_level}%`;
-    if (batRange) batRange.textContent = `${t.ideal_battery_range_km || Math.round(t.battery_level * 4.2)} km`;
+
+    if (tempIn) tempIn.textContent = t.inside_temp !== null ? t.inside_temp : '--';
+    if (tempOut) tempOut.textContent = t.outside_temp !== null ? t.outside_temp : '--';
+    if (batPct) batPct.textContent = t.battery_level !== null ? `${t.battery_level}%` : '--%';
+    if (batRange) {
+      const rangeVal = t.ideal_battery_range_km !== null
+        ? t.ideal_battery_range_km
+        : (t.battery_level !== null ? Math.round(t.battery_level * 4.2) : null);
+      batRange.textContent = rangeVal !== null ? `${rangeVal} km` : '-- km';
+    }
 
     const chargeSoc = document.getElementById('charge-soc-text');
     const chargeProgress = document.getElementById('charge-progress-bar-fill');
@@ -739,8 +989,8 @@ class AppStateMachine {
     const chargeRange = document.getElementById('charge-stat-range');
     const chargeTemp = document.getElementById('charge-stat-temp');
 
-    if (chargeSoc) chargeSoc.textContent = `${t.battery_level}%`;
-    if (chargeProgress) chargeProgress.style.width = `${t.battery_level}%`;
+    if (chargeSoc) chargeSoc.textContent = t.battery_level !== null ? `${t.battery_level}%` : '--%';
+    if (chargeProgress) chargeProgress.style.width = `${t.battery_level || 0}%`;
     if (chargeLimit) chargeLimit.textContent = `${t.charge_limit_soc}%`;
 
     if (chargeRemTime) {
@@ -751,15 +1001,18 @@ class AppStateMachine {
 
     if (chargePower) chargePower.textContent = `${Number(t.charger_power || 0).toFixed(1)} kW`;
     if (chargeVA) chargeVA.textContent = `${t.charger_voltage} V / ${t.charger_actual_current} A`;
-    if (chargeRange) chargeRange.textContent = `${t.ideal_battery_range_km || Math.round(t.battery_level * 4.2)} km`;
-    if (chargeTemp) chargeTemp.textContent = `${t.inside_temp} °C`;
+    if (chargeRange) {
+      const rVal = t.ideal_battery_range_km || (t.battery_level !== null ? Math.round(t.battery_level * 4.2) : null);
+      chargeRange.textContent = rVal !== null ? `${rVal} km` : '-- km';
+    }
+    if (chargeTemp) chargeTemp.textContent = t.inside_temp !== null ? `${t.inside_temp} °C` : '-- °C';
 
     this.updateDoorSafetyLocks();
   }
 
   updateDoorSafetyLocks() {
     const forceUnlock = document.getElementById('chk-force-unlock')?.checked;
-    const isVehicleSafe = (this.telemetry.gear === 'P' && this.telemetry.speed === 0);
+    const isVehicleSafe = (this.telemetry.gear === 'P' && (this.telemetry.speed || 0) === 0);
     const shouldLock = !isVehicleSafe && !forceUnlock;
 
     const doorButtons = document.querySelectorAll('.door-tile-btn');
@@ -770,15 +1023,45 @@ class AppStateMachine {
     const msg = document.getElementById('safety-status-msg');
     if (msg) {
       if (forceUnlock) {
-        msg.textContent = '⚠️ 강제 잠금 해제 활성화됨 (비상)';
+        msg.textContent = '⚠️ 강제 잠금 해제 활성화됨';
         msg.style.color = '#ff9f0a';
       } else if (shouldLock) {
-        msg.textContent = '🔒 주행 중(D/R/N 또는 속도>0) 개방 잠금';
+        msg.textContent = '🔒 주행 중 도어 개방 잠금';
         msg.style.color = 'var(--text-secondary)';
       } else {
         msg.textContent = '🔓 P단 정차 상태: 개방 가능';
         msg.style.color = 'var(--tesla-green)';
       }
+    }
+  }
+
+  async handleSaveVin(rawVinInput) {
+    const val = (rawVinInput || '').trim().toUpperCase();
+    if (val && val.length !== 17) {
+      alert('차대번호(VIN)는 정확히 17자리여야 합니다.');
+      return;
+    }
+
+    if (val && bleManager.device?.name) {
+      const check = await cryptoStore.verifyVinWithDeviceName(val, bleManager.device.name);
+      if (check.matched === false) {
+        const proceed = confirm(
+          `입력하신 VIN(${val})으로 계산된 비콘 이름(${check.computedBeacon})이 현재 연결된 차량(${check.deviceBeacon})과 다릅니다.\n` +
+          `오타가 없는지 확인해 주세요. 그래도 저장하시겠습니까?`
+        );
+        if (!proceed) return;
+      }
+    }
+
+    await cryptoStore.setVin(val);
+    this.vinMismatchDetected = false;
+    this.initialBurstSent = false;
+    this.syncVinInputs();
+    await this.updateDiagnosticBanners();
+
+    if (val && bleManager.connectionState === 'connected') {
+      await this.initiateSessionHandshake();
+      setTimeout(() => this.triggerInitialVehicleDataBurst(), 600);
     }
   }
 
@@ -790,27 +1073,23 @@ class AppStateMachine {
       this.updateWizardStep();
     });
 
-    // 페어링 연결 공통 함수
     const startPairingFlow = async (mode = 'standard') => {
       try {
         await bleManager.connect({ mode });
         this.triggerHaptic(60);
 
-        // 만약 기기명이 "Tesla XXXXXX" 형식이면 끝 6자리 힌트 기록
         const devName = bleManager.device?.name || '';
         this.logPacket('INFO', null, `페어링 요청 전송 중... (연결 기기: ${devName})`);
 
-        const pubKey = this.cachedPublicKeyRaw || cryptoStore.publicKeyRaw;
-        const addKeyPacket = buildAddKeyRequest(pubKey);
-        await bleManager.sendPacket(addKeyPacket, true);
+        await this.sendAddKeyRequestToVehicle();
         this.updateWizardStep();
       } catch (err) {
         console.error('[App] Pairing error:', err);
-        alert('BLE 스캔/연결 실패 [v12]:\n' + formatError(err));
+        alert('BLE 스캔/연결 실패:\n' + formatError(err));
       }
     };
 
-    // 네이티브 BLE 스캐너 모달 제어 이벤트 바인딩
+    // 네이티브 BLE 스캐너 모달 제어
     document.getElementById('btn-native-close-modal')?.addEventListener('click', () => {
       this.triggerHaptic(30);
       bleManager.cancelNativeScanModal();
@@ -856,18 +1135,20 @@ class AppStateMachine {
       await startPairingFlow('all');
     });
 
-    // Step 3에서 AddKeyRequest 재전송 버튼
-    document.getElementById('btn-resend-addkey')?.addEventListener('click', async () => {
-      this.triggerHaptic(50);
+    // Step 3 및 메인 화면에서 AddKeyRequest 전송 버튼
+    const handleResendAddKey = async () => {
+      this.triggerHaptic(60);
       try {
-        const pubKey = this.cachedPublicKeyRaw || cryptoStore.publicKeyRaw;
-        const addKeyPacket = buildAddKeyRequest(pubKey);
-        await bleManager.sendPacket(addKeyPacket, true);
-        this.logPacket('INFO', null, '키 등록 요청(AddKeyRequest)을 차량에 재전송했습니다. 지금 NFC 카드를 태그하세요.');
+        await this.sendAddKeyRequestToVehicle();
+        alert('차량에 키 등록 요청 패킷을 전송했습니다!\n지금 센터콘솔 리더기에 NFC 카드키를 태그하고 차량 모니터에서 [승인]을 눌러주세요.');
       } catch (err) {
-        alert('재전송 실패: ' + formatError(err));
+        alert('키 등록 요청 전송 실패: ' + formatError(err));
       }
-    });
+    };
+
+    document.getElementById('btn-resend-addkey')?.addEventListener('click', handleResendAddKey);
+    document.getElementById('btn-main-send-addkey')?.addEventListener('click', handleResendAddKey);
+    document.getElementById('btn-ctrl-send-addkey')?.addEventListener('click', handleResendAddKey);
 
     document.getElementById('btn-confirm-registration')?.addEventListener('click', async () => {
       this.triggerHaptic(60);
@@ -876,20 +1157,30 @@ class AppStateMachine {
       this.initiateSessionHandshake();
     });
 
-    // 제어 탭 내 VIN 저장 버튼 (최신 펌웨어 AES-GCM AAD Personalization 용)
-    document.getElementById('btn-save-vin')?.addEventListener('click', async () => {
-      this.triggerHaptic(40);
-      const vinInput = document.getElementById('input-control-vin');
-      const val = (vinInput?.value || '').trim().toUpperCase();
-      if (val && val.length !== 17) {
-        alert('차대번호(VIN)는 정확히 17자리여야 합니다.');
-        return;
-      }
-      await cryptoStore.setVin(val);
-      alert(val ? `차대번호(${val})가 저장되었습니다.` : '차대번호 설정이 해제되었습니다.');
+    // 메인 배너 및 제어 탭 VIN 저장
+    document.getElementById('btn-save-main-vin')?.addEventListener('click', async () => {
+      this.triggerHaptic(50);
+      const val = document.getElementById('input-main-vin')?.value || '';
+      await this.handleSaveVin(val);
     });
 
-    // 키 초기화 & 캐시 강제 삭제 후 리로드 핸들러
+    document.getElementById('btn-save-vin')?.addEventListener('click', async () => {
+      this.triggerHaptic(50);
+      const val = document.getElementById('input-control-vin')?.value || '';
+      await this.handleSaveVin(val);
+      if (cryptoStore.vin) {
+        alert(`차대번호(${cryptoStore.vin})가 저장되어 암호화 세션에 적용되었습니다.`);
+      }
+    });
+
+    // 세션 재동기화 버튼
+    document.getElementById('btn-resync-session')?.addEventListener('click', async () => {
+      this.triggerHaptic(40);
+      this.initialBurstSent = false;
+      await this.initiateSessionHandshake();
+    });
+
+    // 키 초기화 모달 핸들러
     const resetModal = document.getElementById('reset-confirm-modal');
 
     const executePurgeAndRestart = async () => {
@@ -898,32 +1189,17 @@ class AppStateMachine {
 
       try {
         await cryptoStore.clearAll();
-      } catch (e) {
-        console.warn('[Purge] Crypto clear error:', e);
-      }
+      } catch (_) {}
 
       try {
         bleManager.disconnect();
-      } catch (e) {
-        console.warn('[Purge] BLE disconnect error:', e);
-      }
+      } catch (_) {}
 
       if ('caches' in window) {
         try {
           const cacheKeys = await caches.keys();
           await Promise.all(cacheKeys.map((k) => caches.delete(k)));
-        } catch (e) {
-          console.warn('[Purge] Cache delete error:', e);
-        }
-      }
-
-      if ('serviceWorker' in navigator) {
-        try {
-          const regs = await navigator.serviceWorker.getRegistrations();
-          await Promise.all(regs.map((r) => r.unregister()));
-        } catch (e) {
-          console.warn('[Purge] SW unregister error:', e);
-        }
+        } catch (_) {}
       }
 
       try {
@@ -935,10 +1211,14 @@ class AppStateMachine {
       }
     };
 
-    document.getElementById('btn-reset-key')?.addEventListener('click', () => {
+    const openResetModal = () => {
       this.triggerHaptic(40);
       resetModal?.classList.add('active');
-    });
+    };
+
+    document.getElementById('btn-reset-key')?.addEventListener('click', openResetModal);
+    document.getElementById('btn-disconnected-reset')?.addEventListener('click', openResetModal);
+    document.getElementById('btn-ctrl-reset-key')?.addEventListener('click', openResetModal);
 
     document.getElementById('btn-modal-cancel-reset')?.addEventListener('click', () => {
       this.triggerHaptic(30);
@@ -949,14 +1229,14 @@ class AppStateMachine {
       await executePurgeAndRestart();
     });
 
-    // 미연결 화면 [차량 블루투스 연결하기] 버튼
+    // 미연결 화면 연결 버튼
     document.getElementById('btn-hero-connect')?.addEventListener('click', async () => {
       try {
         await bleManager.connect({ mode: 'standard' });
         this.triggerHaptic(80);
       } catch (err) {
         console.error('[App] Hero connect error:', err);
-        alert('BLE 스캔/연결 실패 [v12]:\n' + formatError(err));
+        alert('BLE 스캔/연결 실패:\n' + formatError(err));
       }
     });
 
@@ -966,7 +1246,7 @@ class AppStateMachine {
         this.triggerHaptic(80);
       } catch (err) {
         console.error('[App] Hero connect all error:', err);
-        alert('BLE 스캔/연결 실패 [v12]:\n' + formatError(err));
+        alert('BLE 스캔/연결 실패:\n' + formatError(err));
       }
     });
 
@@ -1033,6 +1313,10 @@ class AppStateMachine {
       setTimeout(() => hazardBtn.classList.remove('flash-effect'), 400);
 
       try {
+        if (!cryptoStore.vin || cryptoStore.vin.length !== 17) {
+          alert('비상등 및 도어 제어 명령을 보내려면 화면 상단(또는 하단)에 차량의 17자리 차대번호(VIN)를 먼저 1회 저장해 주세요.');
+          return;
+        }
         const pkt = await buildFlashLightsAction(cryptoStore);
         await bleManager.sendPacket(pkt, true);
       } catch (err) {
@@ -1052,6 +1336,10 @@ class AppStateMachine {
 
         const doorIndex = parseInt(btn.getAttribute('data-door'), 10);
         try {
+          if (!cryptoStore.vin || cryptoStore.vin.length !== 17) {
+            alert('도어 개방 명령을 보내려면 화면 상단(또는 하단)에 차량의 17자리 차대번호(VIN)를 먼저 1회 저장해 주세요.');
+            return;
+          }
           const pkt = await buildOpenDoorAction(doorIndex, cryptoStore);
           await bleManager.sendPacket(pkt, true);
         } catch (err) {
@@ -1061,29 +1349,17 @@ class AppStateMachine {
       });
     });
 
-    // 디버그 로그 시트 이벤트
-    const debugBtn = document.getElementById('btn-toggle-debug');
+    // 디버그 로그 시트 이벤트 (상단 헤더 버튼으로 통합)
     const headerDebugBtn = document.getElementById('btn-header-debug');
-    const wizardDebugBtn = document.getElementById('btn-open-debug-wizard');
-    const disconnectedDebugBtn = document.getElementById('btn-open-debug-disconnected');
     const debugSheet = document.getElementById('debug-log-sheet');
     const closeDebugBtn = document.getElementById('btn-close-debug-sheet');
     const copyDebugBtn = document.getElementById('btn-copy-debug-logs');
     const clearDebugBtn = document.getElementById('btn-clear-debug-logs');
 
-    const openDebugSheet = () => {
-      this.triggerHaptic(40);
-      debugSheet?.classList.add('active');
-    };
-
-    debugBtn?.addEventListener('click', () => {
+    headerDebugBtn?.addEventListener('click', () => {
       this.triggerHaptic(40);
       debugSheet?.classList.toggle('active');
     });
-
-    headerDebugBtn?.addEventListener('click', openDebugSheet);
-    wizardDebugBtn?.addEventListener('click', openDebugSheet);
-    disconnectedDebugBtn?.addEventListener('click', openDebugSheet);
 
     closeDebugBtn?.addEventListener('click', () => {
       debugSheet?.classList.remove('active');
@@ -1124,13 +1400,13 @@ class AppStateMachine {
       }
     };
 
-    logo.addEventListener('mousedown', startPress);
-    logo.addEventListener('touchstart', startPress);
-    logo.addEventListener('mouseup', cancelPress);
-    logo.addEventListener('mouseleave', cancelPress);
-    logo.addEventListener('touchend', cancelPress);
+    logo?.addEventListener('mousedown', startPress);
+    logo?.addEventListener('touchstart', startPress);
+    logo?.addEventListener('mouseup', cancelPress);
+    logo?.addEventListener('mouseleave', cancelPress);
+    logo?.addEventListener('touchend', cancelPress);
 
-    closeBtn.addEventListener('click', () => {
+    closeBtn?.addEventListener('click', () => {
       modal.classList.remove('active');
     });
 

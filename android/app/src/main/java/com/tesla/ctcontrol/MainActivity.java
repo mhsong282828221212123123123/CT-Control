@@ -46,8 +46,15 @@ import androidx.webkit.WebViewAssetLoader;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -114,6 +121,7 @@ public class MainActivity extends AppCompatActivity {
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
+        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         settings.setMediaPlaybackRequiresUserGesture(false);
 
         WebView.setWebContentsDebuggingEnabled(true);
@@ -123,11 +131,67 @@ public class MainActivity extends AppCompatActivity {
             .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
             .build();
 
+        final long sessionTs = System.currentTimeMillis();
+        final String remoteBaseUrl = "https://mhsong282828221212123123123.github.io/CT-Control/";
+
         webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                return assetLoader.shouldInterceptRequest(request.getUrl());
+                Uri uri = request.getUrl();
+                if (uri != null && "appassets.androidplatform.net".equals(uri.getHost())) {
+                    String path = uri.getPath();
+                    if (path != null && path.startsWith("/assets/")) {
+                        String relPath = path.substring("/assets/".length());
+                        if (relPath.endsWith(".html") || relPath.endsWith(".js") || relPath.endsWith(".css") || relPath.endsWith(".json")) {
+                            HttpURLConnection conn = null;
+                            try {
+                                URL liveUrl = new URL(remoteBaseUrl + relPath + "?t=" + sessionTs);
+                                conn = (HttpURLConnection) liveUrl.openConnection();
+                                conn.setConnectTimeout(1800);
+                                conn.setReadTimeout(2200);
+                                conn.setUseCaches(false);
+                                conn.setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate");
+                                if (conn.getResponseCode() == 200) {
+                                    InputStream is = conn.getInputStream();
+                                    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                                    byte[] chunk = new byte[4096];
+                                    int n;
+                                    while ((n = is.read(chunk)) != -1) {
+                                        buffer.write(chunk, 0, n);
+                                    }
+                                    is.close();
+
+                                    String mime = "text/plain";
+                                    if (relPath.endsWith(".html")) mime = "text/html";
+                                    else if (relPath.endsWith(".js")) mime = "application/javascript";
+                                    else if (relPath.endsWith(".css")) mime = "text/css";
+                                    else if (relPath.endsWith(".json")) mime = "application/json";
+
+                                    Map<String, String> headers = new HashMap<>();
+                                    headers.put("Access-Control-Allow-Origin", "*");
+                                    headers.put("Cache-Control", "no-cache, no-store, must-revalidate");
+
+                                    return new WebResourceResponse(
+                                        mime,
+                                        "UTF-8",
+                                        200,
+                                        "OK",
+                                        headers,
+                                        new ByteArrayInputStream(buffer.toByteArray())
+                                    );
+                                }
+                            } catch (Exception ignored) {
+                                // 지하주차장 등 오프라인 환경에서는 즉시 APK 내장 에셋으로 폴백
+                            } finally {
+                                if (conn != null) {
+                                    conn.disconnect();
+                                }
+                            }
+                        }
+                    }
+                }
+                return assetLoader.shouldInterceptRequest(uri);
             }
         });
 
