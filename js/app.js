@@ -69,20 +69,18 @@ class AppStateMachine {
     this.pollTickCount = 0;
 
     // 공식 SDK 규격: BLE MTU(1024B) 초과 방지를 위해 GetVehicleData는 1회당 1개 카테고리만 순환 요청
-    // 고속도로 주행 중 속도 변화(5초 이내 90->10km/h 미만)를 놓치지 않도록 DriveState 비중을 최우선 배치
+    // 속도는 스마트폰 GPS로 실시간(0.4~1.0초) 정밀 측정하므로, BLE는 기어/출력/배터리/온도/공기압을 고르게 조회
     this.vehicleDataCategories = [
       VEHICLE_DATA_DRIVE_STATE,
-      VEHICLE_DATA_DRIVE_STATE,
       VEHICLE_DATA_CHARGE_STATE,
-      VEHICLE_DATA_DRIVE_STATE,
-      VEHICLE_DATA_DRIVE_STATE,
       VEHICLE_DATA_CLIMATE_STATE,
-      VEHICLE_DATA_DRIVE_STATE,
       VEHICLE_DATA_TIRE_PRESSURE_STATE
     ];
     this.vehicleDataCategoryIdx = 0;
     this.initialBurstSent = false;
     this.vinMismatchDetected = false;
+    this.lastGpsSpeedAt = 0;
+    this.gpsWatchId = null;
 
     // 급감속 감지 상태 추적기
     this.autoHazardEnabled = true;
@@ -799,12 +797,18 @@ class AppStateMachine {
       Object.assign(this.telemetry.tpms, incomingTel.tpms);
     }
 
+    // GPS 속도가 최근 4초 이내에 수신되고 있다면 속도는 실시간 GPS 값을 우선 유지하고(터널 등 GPS 음영 지역에서만 BLE 속도 폴백)
+    const isGpsActive = (Date.now() - this.lastGpsSpeedAt) < 4000;
+
     const scalarKeys = [
-      'speed', 'gear', 'power', 'charging_state', 'battery_level',
+      'gear', 'power', 'charging_state', 'battery_level',
       'charge_limit_soc', 'time_to_full_charge', 'charger_power',
       'charger_voltage', 'charger_actual_current', 'ideal_battery_range_km',
       'inside_temp', 'outside_temp', 'locked'
     ];
+    if (!isGpsActive) {
+      scalarKeys.push('speed');
+    }
     for (const k of scalarKeys) {
       if (incomingTel[k] !== undefined && incomingTel[k] !== null) {
         this.telemetry[k] = incomingTel[k];
@@ -817,8 +821,8 @@ class AppStateMachine {
       this.updateDiagnosticBanners();
     }
 
-    // 8. 급감속 감지 알고리즘 실행
-    if (incomingTel.speed !== undefined) {
+    // 8. 급감속 감지 알고리즘 실행 (GPS 미수신 음영 지역이거나 시뮬레이션 모드일 때 BLE 속도 폴백)
+    if (!isGpsActive && incomingTel.speed !== undefined) {
       this.detectRapidDeceleration(this.telemetry.speed);
     }
 
@@ -874,7 +878,48 @@ class AppStateMachine {
   }
 
   setupMotionFallback() {
-    // 속도 데이터 기반(5초 내 90km/h 이상 -> 10km/h 미만)으로 일원화하여 휴대폰 거치 흔들림 오작동 방지
+    // 스마트폰 고정밀 GPS(네이티브 LocationManager + Web Geolocation watchPosition)로
+    // 차량 BLE 지연 없이 실시간 주행 속도(km/h) 갱신 및 고속도로 급감속(5초 내 90->10km/h 미만) 감지 수행
+    const applyGpsSpeedKmh = (rawKmh) => {
+      if (typeof rawKmh !== 'number' || Number.isNaN(rawKmh) || rawKmh < 0) return;
+      const kmh = rawKmh < 2 ? 0 : Math.round(rawKmh);
+      this.lastGpsSpeedAt = Date.now();
+      this.telemetry.speed = kmh;
+
+      const speedEl = document.getElementById('cluster-speed-val');
+      if (speedEl) speedEl.textContent = kmh;
+
+      this.updateDoorSafetyLocks();
+      this.detectRapidDeceleration(kmh);
+    };
+
+    // 1. Android 네이티브 APK GPS 속도 브릿지 콜백
+    if (typeof window !== 'undefined') {
+      window.__onNativeGpsSpeed = (kmh) => {
+        applyGpsSpeedKmh(Number(kmh));
+      };
+    }
+
+    // 2. HTML5 High-Accuracy Geolocation watchPosition (웹 & 하이브리드 동시 지원)
+    if (typeof navigator !== 'undefined' && navigator.geolocation && typeof navigator.geolocation.watchPosition === 'function') {
+      try {
+        this.gpsWatchId = navigator.geolocation.watchPosition(
+          (pos) => {
+            if (pos && pos.coords && typeof pos.coords.speed === 'number' && pos.coords.speed >= 0) {
+              applyGpsSpeedKmh(pos.coords.speed * 3.6);
+            }
+          },
+          () => {
+            // GPS 일시 미수신(지하주차장/터널) 시 자동으로 BLE DriveState 속도로 폴백됨
+          },
+          {
+            enableHighAccuracy: true,
+            maximumAge: 0,
+            timeout: 5000
+          }
+        );
+      } catch (_) {}
+    }
   }
 
   async triggerAutoHazardFlash() {

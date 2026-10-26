@@ -20,6 +20,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.location.Location;
+import android.location.LocationListener;
 import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Build;
@@ -30,6 +32,7 @@ import android.os.ParcelUuid;
 import android.provider.Settings;
 import android.util.SparseArray;
 import android.view.WindowManager;
+import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -121,6 +124,7 @@ public class MainActivity extends AppCompatActivity {
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
+        settings.setGeolocationEnabled(true);
         settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         settings.setMediaPlaybackRequiresUserGesture(false);
 
@@ -134,7 +138,12 @@ public class MainActivity extends AppCompatActivity {
         final long sessionTs = System.currentTimeMillis();
         final String remoteBaseUrl = "https://mhsong282828221212123123123.github.io/CT-Control/";
 
-        webView.setWebChromeClient(new WebChromeClient());
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
+                callback.invoke(origin, true, false);
+            }
+        });
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
@@ -197,6 +206,36 @@ public class MainActivity extends AppCompatActivity {
 
         webView.addJavascriptInterface(new TeslaBleBridge(), "AndroidBLE");
         webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");
+
+        startNativeGpsTracking();
+    }
+
+    private boolean isGpsTracking = false;
+    private final LocationListener gpsLocationListener = new LocationListener() {
+        @Override
+        public void onLocationChanged(@NonNull Location location) {
+            if (location.hasSpeed()) {
+                float speedMps = location.getSpeed();
+                int kmh = Math.round(speedMps * 3.6f);
+                if (kmh < 2) kmh = 0;
+                emitJs("window.__onNativeGpsSpeed && window.__onNativeGpsSpeed(" + kmh + ");");
+            }
+        }
+    };
+
+    private void startNativeGpsTracking() {
+        if (isGpsTracking) return;
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        try {
+            LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+            if (lm != null && lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 400L, 0f, gpsLocationListener, Looper.getMainLooper());
+                isGpsTracking = true;
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     private void emitJs(final String script) {
@@ -253,6 +292,7 @@ public class MainActivity extends AppCompatActivity {
         if (requestCode == REQ_BLE_PERMISSIONS) {
             if (hasBlePermissions()) {
                 emitLog("블루투스 및 정밀 위치(iBeacon 스캔) 권한 승인 완료", "info");
+                startNativeGpsTracking();
                 if (pendingScanMode != null) {
                     String mode = pendingScanMode;
                     pendingScanMode = null;
