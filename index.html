@@ -3,18 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v11]</title>
-  <link rel="manifest" href="./manifest.json?v=11">
+  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v12]</title>
+  <link rel="manifest" href="./manifest.json?v=12">
   <meta name="theme-color" content="#0d0d0d">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <script>
-    // [v11 캐시 파쇄] Service Worker 등록 강제 해제 및 Web Cache 강제 소각
+    // [v12 캐시 파쇄] Service Worker 등록 강제 해제 및 Web Cache 강제 소각
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs) {
         for (var i = 0; i < regs.length; i++) {
           regs[i].unregister();
-          console.log('[v11] Unregistered old SW:', regs[i]);
+          console.log('[v12] Unregistered old SW:', regs[i]);
         }
       });
     }
@@ -24,7 +24,7 @@
       });
     }
   </script>
-  <link rel="stylesheet" href="./style.css?v=11">
+  <link rel="stylesheet" href="./style.css?v=12">
 </head>
 <body>
 
@@ -37,7 +37,7 @@
       <div id="brand-logo" class="brand-logo" title="5초간 길게 누르면 데모 모드 활성화">
         <span>TESLA</span>
         <span class="brand-badge">CT</span>
-        <span style="color:#00ff88; font-weight:bold; margin-left:10px;">[BUILD v11]</span>
+        <span id="build-version-badge" style="color:#00ff88; font-weight:bold; margin-left:10px;">[BUILD v12]</span>
       </div>
       <div id="connection-indicator" class="connection-indicator">
         <span class="status-dot">🔴</span>
@@ -92,32 +92,45 @@
           <div style="font-size: 48px;">📡</div>
           <p style="font-weight: 700; color: #fff;">차량 BLE 비콘 검색 및 연결</p>
 
+          <!-- [v12] 웹 브라우저 접속 시에만 노출되는 안드로이드 전용 APK 설치 배너 -->
+          <div class="apk-only-web-banner" style="background: rgba(0, 230, 118, 0.14); border: 2px solid #00e676; border-radius: 12px; padding: 14px; margin-bottom: 12px; text-align: left; width: 100%; box-sizing: border-box;">
+            <div style="font-size: 14px; font-weight: 800; color: #00ff88; margin-bottom: 6px;">
+              📲 안드로이드 전용 앱(APK) 설치 (iBeacon 차단 우회)
+            </div>
+            <div style="font-size: 12px; color: #f5f5f7; line-height: 1.5; margin-bottom: 10px;">
+              Android 12+의 Chrome 브라우저는 OS 보안 정책(<code>neverForLocation</code>) 때문에 테슬라의 iBeacon(<code>0x004C</code> / <code>S...C</code>) 신호를 차단합니다.<br>
+              아래 버튼을 눌러 <strong>전용 안드로이드 앱(APK)</strong>을 설치해 실행하면 차단 없이 차량 신호를 즉시 감지합니다.
+            </div>
+            <a href="./CT-Control.apk" download="CT-Control.apk" style="display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 12px; border-radius: 8px; background: #00e676; color: #000; font-size: 14px; font-weight: 800; text-decoration: none; box-sizing: border-box;">
+              ⬇️ CT-Control.apk 다운로드 및 설치
+            </a>
+          </div>
+
           <!-- BLE 연결 제한(최대 3개) 및 비콘 표시 안내 -->
           <div style="background: rgba(232, 33, 39, 0.12); border: 1px solid rgba(232, 33, 39, 0.4); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; text-align: left; width: 100%; box-sizing: border-box;">
             <div style="font-size: 13px; font-weight: 800; color: #ff5252; margin-bottom: 6px;">
-              🚨 목록에 차량이 안 뜰 때 (최대 BLE 슬롯 3개 제한)
+              🚨 스캔 전 필수 확인 (위치/GPS ON &amp; 슬롯 3개 제한)
             </div>
             <div style="font-size: 12px; color: #f5f5f7; line-height: 1.55;">
-              • 테슬라 차량은 동시에 <strong>최대 3개의 BLE 기기</strong>만 연결할 수 있습니다.<br>
-              • 이미 스마트폰의 <strong>공식 Tesla 앱</strong>이나 워치/서드파티 동글이 연결 중이면 차량이 새 연결 신호를 숨깁니다.<br>
-              • <strong>스마트폰 설정 &gt; 애플리케이션 &gt; Tesla &gt; [강제 종료]</strong> 후 검색해 주세요.
+              • 안드로이드 상단바의 <strong>위치(GPS)</strong>가 반드시 켜져 있어야 테슬라 iBeacon 패킷이 수신됩니다.<br>
+              • 테슬라 차량은 동시에 <strong>최대 3개의 BLE 기기</strong>만 연결할 수 있으므로, 연결이 안 될 때는 메인폰의 <strong>공식 Tesla 앱을 강제 종료</strong>해 주세요.
             </div>
           </div>
 
           <div style="background: rgba(0, 229, 255, 0.08); border: 1px solid rgba(0, 229, 255, 0.3); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; text-align: left; font-size: 11px; line-height: 1.5; color: #b2ebf2; width: 100%; box-sizing: border-box;">
-            💡 <strong>차량 BLE 이름 형태:</strong><br>
-            • 구형: <code>S</code> + 16자리 영문/숫자 + <code>C</code> (예: <code>S1a87...58C</code>)<br>
-            • 신형(2023+): <code>Tesla </code> + 차대번호 뒤 6자리 (예: <code>Tesla 130307</code>)<br>
+            💡 <strong>차량 BLE 감지 기준 (3중 자동 감지):</strong><br>
+            • 테슬라 고정 iBeacon: <code>74278bda-b644-4520-8f0c-720eaf059935</code><br>
+            • 비콘 이름 / UUID: <code>S...C</code> / <code>Tesla + 6자리</code> / <code>0x1122</code><br>
             <span style="color: #ffcc00;">※ 음악/통화용 오디오(<code>Tesla Model 3 ...</code>)는 선택하지 마세요.</span>
           </div>
 
           <!-- 2가지 스캔 모드 버튼 -->
           <div style="display: flex; flex-direction: column; gap: 8px; width: 100%;">
             <button id="btn-request-pairing" class="btn-primary" style="width: 100%; min-height: 52px; font-size: 15px; font-weight: 700;">
-              🚗 테슬라 BLE 검색 (0x1122 / S...C / Tesla 필터)
+              🚗 테슬라 BLE 검색 (iBeacon / 0x1122 / S...C)
             </button>
             <button id="btn-request-pairing-all" class="btn-secondary" style="width: 100%; padding: 10px; font-size: 12px; border-color: rgba(255,255,255,0.2);">
-              🔍 전체 기기 검색 (안 뜰 때 필터 해제)
+              🔍 전체 기기 검색 (주변 모든 BLE 패킷 보기)
             </button>
           </div>
 
@@ -176,6 +189,11 @@
         <button id="btn-hero-connect-all" class="btn-secondary" style="width: 100%; max-width: 320px; padding: 10px; font-size: 12px; margin-top: 4px;">
           🔍 전체 기기 검색 (안 뜰 때 필터 해제)
         </button>
+        <div class="apk-only-web-banner" style="width: 100%; max-width: 320px; margin-top: 8px;">
+          <a href="./CT-Control.apk" download="CT-Control.apk" style="display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 11px; border-radius: 8px; background: rgba(0, 230, 118, 0.2); border: 1px solid #00e676; color: #00ff88; font-size: 13px; font-weight: 700; text-decoration: none; box-sizing: border-box;">
+            📲 안드로이드 전용 앱(CT-Control.apk) 다운로드
+          </a>
+        </div>
         <div style="text-align: center; margin-top: 10px;">
           <button id="btn-open-debug-disconnected" style="background: transparent; border: 1px dashed rgba(255,255,255,0.25); border-radius: 8px; color: var(--text-secondary); font-size: 13px; padding: 7px 14px; cursor: pointer;">
             🐞 실시간 BLE 연결 디버그 로그 보기
@@ -454,6 +472,41 @@
     </div>
   </div>
 
-  <script type="module" src="./js/app.js?v=11"></script>
+  <!-- ==========================================
+       7. [📡 네이티브 Android BLE / iBeacon 스캐너 모달]
+       ========================================== -->
+  <div id="native-ble-modal" class="demo-modal-overlay">
+    <div class="demo-modal-box" style="max-width: 440px; width: 94%; max-height: 86vh; display: flex; flex-direction: column; gap: 10px; padding: 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h3 style="font-size: 16px; font-weight: 800; color: #00ff88;">📡 네이티브 BLE &amp; iBeacon 스캐너</h3>
+        <button id="btn-native-close-modal" class="btn-secondary" style="padding: 5px 10px; font-size: 12px;">✕ 닫기</button>
+      </div>
+
+      <div id="native-scan-status-text" style="font-size: 12px; color: #b2ebf2; background: rgba(0, 229, 255, 0.08); border: 1px solid rgba(0, 229, 255, 0.25); border-radius: 8px; padding: 8px 10px;">
+        📡 주변 BLE 및 Apple iBeacon(0x004C) 신호 실시간 스캔 준비 중...
+      </div>
+
+      <div id="native-gps-warning" style="display: none; background: rgba(255, 82, 82, 0.16); border: 1px solid #ff5252; border-radius: 8px; padding: 10px; font-size: 12px; color: #ffd0d0;">
+        <div style="font-weight: 800; margin-bottom: 6px;">⚠️ 휴대폰 상단바의 '위치(GPS)'가 꺼져 있습니다!</div>
+        <div style="margin-bottom: 8px;">안드로이드 OS에서 테슬라 iBeacon 패킷을 수신하려면 위치(GPS) 스위치가 켜져 있어야 합니다.</div>
+        <button id="btn-native-open-gps" class="btn-primary" style="width: 100%; padding: 8px; font-size: 12px;">📍 휴대폰 위치(GPS) 설정 열기</button>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+        <span id="native-scan-count" style="font-size: 11px; color: var(--text-secondary);">감지된 BLE 기기: 0개</span>
+        <button id="btn-native-rescan" class="btn-secondary" style="padding: 5px 10px; font-size: 11px;">🔄 다시 스캔</button>
+      </div>
+
+      <button id="btn-native-toggle-filter" class="btn-secondary" style="width: 100%; padding: 8px; font-size: 12px; border-color: rgba(0, 229, 255, 0.35); color: #b2ebf2;">
+        🚗 현재: 테슬라 신호 우선 표시 (클릭 시 전체 기기 보기)
+      </button>
+
+      <div id="native-ble-device-list" style="display: flex; flex-direction: column; gap: 8px; overflow-y: auto; max-height: 48vh; padding-right: 2px;">
+        <!-- 실시간 스캔 결과 리스트 -->
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./js/app.js?v=12"></script>
 </body>
 </html>

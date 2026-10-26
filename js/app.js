@@ -1,11 +1,11 @@
 /**
  * app.js
  * 메인 상태 머신 (State Machine), UI 바인딩,
- * ECDH + AES-128-GCM 세션 핸드셰이크, VCSEC/CarServer 폴링 및 급감속 감지 연동 [v11]
+ * ECDH + AES-128-GCM 세션 핸드셰이크, VCSEC/CarServer 폴링 및 급감속 감지 연동 [v12]
  */
 
-import { cryptoStore } from './crypto-store.js?v=11';
-import { bleManager } from './ble-manager.js?v=11';
+import { cryptoStore } from './crypto-store.js?v=12';
+import { bleManager } from './ble-manager.js?v=12';
 import {
   DOMAIN_VEHICLE_SECURITY,
   DOMAIN_INFOTAINMENT,
@@ -19,7 +19,7 @@ import {
   buildGetVehicleDataRequest,
   bytesToHex,
   computeTeslaBLEBeaconName
-} from './proto-codec.js?v=11';
+} from './proto-codec.js?v=12';
 
 export function formatError(err) {
   if (err === undefined) return 'undefined (User Gesture 만료 또는 스캔 권한 미허용)';
@@ -188,9 +188,20 @@ class AppStateMachine {
    * 앱 초기화
    */
   async init() {
-    console.log('[App] Initializing CT-Control App [v11]...');
+    console.log('[App] Initializing CT-Control App [v12]...');
 
     this.registerServiceWorker();
+
+    // 네이티브 안드로이드 APK 환경 여부에 따른 배너/배지 처리
+    if (bleManager.isNativeApp()) {
+      const badgeEl = document.getElementById('build-version-badge');
+      if (badgeEl) {
+        badgeEl.textContent = '[BUILD v12 · NATIVE APK]';
+      }
+      document.querySelectorAll('.apk-only-web-banner').forEach((el) => {
+        el.style.display = 'none';
+      });
+    }
 
     await cryptoStore.init();
     this.cachedPublicKeyRaw = cryptoStore.publicKeyRaw;
@@ -795,9 +806,47 @@ class AppStateMachine {
         this.updateWizardStep();
       } catch (err) {
         console.error('[App] Pairing error:', err);
-        alert('BLE 스캔/연결 실패 [v11]:\n' + formatError(err));
+        alert('BLE 스캔/연결 실패 [v12]:\n' + formatError(err));
       }
     };
+
+    // 네이티브 BLE 스캐너 모달 제어 이벤트 바인딩
+    document.getElementById('btn-native-close-modal')?.addEventListener('click', () => {
+      this.triggerHaptic(30);
+      bleManager.cancelNativeScanModal();
+    });
+
+    document.getElementById('btn-native-open-gps')?.addEventListener('click', () => {
+      this.triggerHaptic(40);
+      if (bleManager.isNativeApp()) {
+        window.AndroidBLE.openLocationSettings();
+      }
+    });
+
+    document.getElementById('btn-native-rescan')?.addEventListener('click', () => {
+      this.triggerHaptic(40);
+      if (bleManager.isNativeApp()) {
+        bleManager.nativeScanItems.clear();
+        bleManager.renderNativeScanList();
+        try {
+          const env = JSON.parse(window.AndroidBLE.getEnvStatusJson() || '{}');
+          const gpsWarnEl = document.getElementById('native-gps-warning');
+          if (gpsWarnEl) {
+            gpsWarnEl.style.display = env.locationEnabled === false ? 'block' : 'none';
+          }
+        } catch (_) {}
+        window.AndroidBLE.startScan(bleManager.nativeScanFilterMode);
+      }
+    });
+
+    document.getElementById('btn-native-toggle-filter')?.addEventListener('click', (e) => {
+      this.triggerHaptic(30);
+      bleManager.nativeScanFilterMode = bleManager.nativeScanFilterMode === 'standard' ? 'all' : 'standard';
+      e.currentTarget.textContent = bleManager.nativeScanFilterMode === 'all'
+        ? '🔍 현재: 모든 기기 표시 중 (클릭 시 테슬라만 필터)'
+        : '🚗 현재: 테슬라 신호 우선 표시 (클릭 시 전체 기기 보기)';
+      bleManager.renderNativeScanList();
+    });
 
     document.getElementById('btn-request-pairing')?.addEventListener('click', async () => {
       await startPairingFlow('standard');
@@ -907,7 +956,7 @@ class AppStateMachine {
         this.triggerHaptic(80);
       } catch (err) {
         console.error('[App] Hero connect error:', err);
-        alert('BLE 스캔/연결 실패 [v11]:\n' + formatError(err));
+        alert('BLE 스캔/연결 실패 [v12]:\n' + formatError(err));
       }
     });
 
@@ -917,7 +966,7 @@ class AppStateMachine {
         this.triggerHaptic(80);
       } catch (err) {
         console.error('[App] Hero connect all error:', err);
-        alert('BLE 스캔/연결 실패 [v11]:\n' + formatError(err));
+        alert('BLE 스캔/연결 실패 [v12]:\n' + formatError(err));
       }
     });
 

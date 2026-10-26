@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Android 11 이하 블루투스 권한 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+
+    <!-- Android 12+ (API 31+) 블루투스 스캔/연결 권한
+         핵심: neverForLocation 플래그를 절대 사용하지 않음!
+         테슬라 차량(VCSEC)은 Apple iBeacon 포맷(0x004C 0x02 0x15, UUID 74278bda-b644-4520-8f0c-720eaf059935)으로
+         브로드캐스트하므로, neverForLocation을 제거하고 ACCESS_FINE_LOCATION과 함께 스캔해야
+         안드로이드 OS가 테슬라 BLE 패킷을 차단(Drop)하지 않고 100% 전달함 -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        tools:remove="android:usesPermissionFlags" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- iBeacon 및 필터링 없는 BLE 스캔을 위한 정밀 위치 권한 -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="true" />
+
+    <application
+        android:allowBackup="true"
+        android:label="CT-Control"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.NoActionBar"
+        android:usesCleartextTraffic="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true"
+            android:keepScreenOn="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
