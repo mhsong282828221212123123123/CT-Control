@@ -1370,28 +1370,75 @@ class AppStateMachine {
       }
     });
 
-    // 4개 도어 래치 물리 개방
+    // 4개 도어 래치 물리 개방 (안전 재확인 모달 적용)
+    const doorConfirmModal = document.getElementById('door-confirm-modal');
+    const doorConfirmTitle = document.getElementById('door-confirm-title');
+    const doorConfirmDesc = document.getElementById('door-confirm-desc');
+    const btnCancelDoor = document.getElementById('btn-modal-cancel-door');
+    const btnConfirmDoor = document.getElementById('btn-modal-confirm-door');
+
+    const doorLabels = {
+      0: '운전석(전방 좌측) 문',
+      1: '조수석(전방 우측) 문',
+      2: '운전석 후방(좌측 뒷문)',
+      3: '조수석 후방(우측 뒷문)'
+    };
+
+    let pendingDoorIndex = null;
+    let pendingDoorBtn = null;
+
     const doorBtns = document.querySelectorAll('.door-tile-btn');
     doorBtns.forEach((btn) => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', () => {
         if (btn.disabled) return;
-        this.triggerHaptic(80);
-        btn.classList.add('flash-effect');
-        setTimeout(() => btn.classList.remove('flash-effect'), 400);
+        this.triggerHaptic(50);
+
+        if (!cryptoStore.vin || cryptoStore.vin.length !== 17) {
+          alert('도어 개방 명령을 보내려면 화면 상단(또는 하단)에 차량의 17자리 차대번호(VIN)를 먼저 1회 저장해 주세요.');
+          return;
+        }
 
         const doorIndex = parseInt(btn.getAttribute('data-door'), 10);
-        try {
-          if (!cryptoStore.vin || cryptoStore.vin.length !== 17) {
-            alert('도어 개방 명령을 보내려면 화면 상단(또는 하단)에 차량의 17자리 차대번호(VIN)를 먼저 1회 저장해 주세요.');
-            return;
-          }
-          const pkt = await buildOpenDoorAction(doorIndex, cryptoStore);
-          await bleManager.sendPacket(pkt, true);
-        } catch (err) {
-          console.error(`Door ${doorIndex} unlatch failed:`, err);
-          alert('도어 개방 명령 실패: ' + formatError(err));
-        }
+        const doorName = doorLabels[doorIndex] || '선택한 문';
+
+        pendingDoorIndex = doorIndex;
+        pendingDoorBtn = btn;
+
+        if (doorConfirmTitle) doorConfirmTitle.textContent = `${doorName} 개방 확인`;
+        if (doorConfirmDesc) doorConfirmDesc.textContent = `[${doorName}]을(를) 정말로 여시겠습니까?`;
+        doorConfirmModal?.classList.add('active');
       });
+    });
+
+    btnCancelDoor?.addEventListener('click', () => {
+      this.triggerHaptic(30);
+      pendingDoorIndex = null;
+      pendingDoorBtn = null;
+      doorConfirmModal?.classList.remove('active');
+    });
+
+    btnConfirmDoor?.addEventListener('click', async () => {
+      const doorIndex = pendingDoorIndex;
+      const targetBtn = pendingDoorBtn;
+      pendingDoorIndex = null;
+      pendingDoorBtn = null;
+      doorConfirmModal?.classList.remove('active');
+
+      if (doorIndex === null || doorIndex === undefined) return;
+
+      this.triggerHaptic(90);
+      if (targetBtn) {
+        targetBtn.classList.add('flash-effect');
+        setTimeout(() => targetBtn.classList.remove('flash-effect'), 400);
+      }
+
+      try {
+        const pkt = await buildOpenDoorAction(doorIndex, cryptoStore);
+        await bleManager.sendPacket(pkt, true);
+      } catch (err) {
+        console.error(`Door ${doorIndex} unlatch failed:`, err);
+        alert('도어 개방 명령 실패: ' + formatError(err));
+      }
     });
 
     // 디버그 로그 시트 이벤트 (상단 헤더 버튼으로 통합)

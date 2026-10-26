@@ -497,6 +497,26 @@
   </div>
 
   <!-- ==========================================
+       6-2. [🚪 도어 물리 개방 재확인 모달]
+       ========================================== -->
+  <div id="door-confirm-modal" class="demo-modal-overlay">
+    <div class="demo-modal-box" style="text-align: center;">
+      <div style="font-size: 40px; margin-bottom: 2px;">🚪</div>
+      <h3 id="door-confirm-title" style="font-size: 18px; font-weight: 800; color: #fff;">도어 개방 확인</h3>
+      <p id="door-confirm-desc" style="font-size: 14px; color: var(--text-primary); line-height: 1.55; font-weight: 600;">
+        선택하신 문을 정말로 여시겠습니까?
+      </p>
+      <p style="font-size: 12px; color: var(--tesla-amber); line-height: 1.4;">
+        ⚠️ 도어 래치가 즉시 해제되어 문이 물리적으로 열립니다. 주변 안전을 확인해 주세요.
+      </p>
+      <div style="display: flex; gap: 10px; margin-top: 4px;">
+        <button id="btn-modal-cancel-door" class="btn-secondary" style="flex: 1; padding: 13px; font-size: 14px; font-weight: 700;">취소</button>
+        <button id="btn-modal-confirm-door" class="btn-primary" style="flex: 1; background-color: var(--tesla-red); padding: 13px; font-size: 14px; font-weight: 800;">문 열기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================
        7. [📡 네이티브 Android BLE / iBeacon 스캐너 모달]
        ========================================== -->
   <div id="native-ble-modal" class="demo-modal-overlay">
