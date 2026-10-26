@@ -4,8 +4,8 @@
  * ECDH + AES-128-GCM 양방향 세션 핸드셰이크, 단일 카테고리 순환 폴링 및 급감속 감지 연동 [v13]
  */
 
-import { cryptoStore } from './crypto-store.js?v=13';
-import { bleManager } from './ble-manager.js?v=13';
+import { cryptoStore } from './crypto-store.js?v=14';
+import { bleManager } from './ble-manager.js?v=14';
 import {
   DOMAIN_VEHICLE_SECURITY,
   DOMAIN_INFOTAINMENT,
@@ -24,7 +24,7 @@ import {
   buildWhitelistInfoRequest,
   buildGetVehicleDataRequest,
   bytesToHex
-} from './proto-codec.js?v=13';
+} from './proto-codec.js?v=14';
 
 export function formatError(err) {
   if (err === undefined) return 'undefined (User Gesture 만료 또는 스캔 권한 미허용)';
@@ -725,6 +725,15 @@ class AppStateMachine {
           }
           if (targetDomain === DOMAIN_INFOTAINMENT) {
             this.triggerInitialVehicleDataBurst();
+          } else if (targetDomain === DOMAIN_VEHICLE_SECURITY && this.pendingRetryDoorOpen) {
+            const pending = this.pendingRetryDoorOpen;
+            if (!pending.retried && Date.now() - pending.timestamp < 8000) {
+              pending.retried = true;
+              this.logPacket('INFO', null, `🔓 VCSEC 세션 동기화 완료 → 도어(${pending.doorIndex + 1}) 개방 명령 자동 재전송`);
+              buildOpenDoorAction(pending.doorIndex, cryptoStore)
+                .then((pkt) => bleManager.sendPacket(pkt, true))
+                .catch((e) => console.warn('Door auto-retry failed:', e));
+            }
           }
         }
         this.updateDiagnosticBanners();
@@ -733,9 +742,17 @@ class AppStateMachine {
       }
     }
 
-    // 4. 차량에서 보고된 카운터 동기화
-    if (parsed.reportedCounter !== null && typeof parsed.reportedCounter === 'number') {
-      await cryptoStore.syncCounter(parsed.reportedCounter);
+    // 4. 차량에서 보고된 도메인별 카운터 동기화 (CommandStatus 등으로 수신된 경우)
+    if (!parsed.sessionInfo && parsed.reportedCounter !== null && typeof parsed.reportedCounter === 'number') {
+      await cryptoStore.syncCounter(parsed.reportedCounter, parsed.domain || DOMAIN_VEHICLE_SECURITY);
+    }
+
+    // 4-1. VCSEC CommandStatus 내부 서명 오류(signedMessageInformation) 감지 시 즉시 VCSEC 세션 재동기화
+    if (parsed.vcsecSignedMessageFault) {
+      const vFault = parsed.vcsecSignedMessageFault;
+      this.logPacket('WARN', null, `⚠️ VCSEC 명령 서명/카운터 동기화 필요 (VCSEC Fault=${vFault}) → 즉시 세션 재요청`);
+      const req = buildSessionInfoRequest(cryptoStore.publicKeyRaw, DOMAIN_VEHICLE_SECURITY, cryptoStore.routingAddress);
+      bleManager.sendPacket(req, true).catch(() => {});
     }
 
     // 5. 서명/메타데이터 Fault 감지 및 자동 복구
@@ -1004,10 +1021,10 @@ class AppStateMachine {
       const fr = document.getElementById('tpms-fr');
       const rl = document.getElementById('tpms-rl');
       const rr = document.getElementById('tpms-rr');
-      if (fl) fl.textContent = t.tpms.fl !== null ? `${t.tpms.fl} Bar` : '-- Bar';
-      if (fr) fr.textContent = t.tpms.fr !== null ? `${t.tpms.fr} Bar` : '-- Bar';
-      if (rl) rl.textContent = t.tpms.rl !== null ? `${t.tpms.rl} Bar` : '-- Bar';
-      if (rr) rr.textContent = t.tpms.rr !== null ? `${t.tpms.rr} Bar` : '-- Bar';
+      if (fl) fl.textContent = t.tpms.fl !== null ? `${t.tpms.fl} psi` : '-- psi';
+      if (fr) fr.textContent = t.tpms.fr !== null ? `${t.tpms.fr} psi` : '-- psi';
+      if (rl) rl.textContent = t.tpms.rl !== null ? `${t.tpms.rl} psi` : '-- psi';
+      if (rr) rr.textContent = t.tpms.rr !== null ? `${t.tpms.rr} psi` : '-- psi';
     }
 
     const tempIn = document.getElementById('temp-in');
@@ -1433,6 +1450,13 @@ class AppStateMachine {
       }
 
       try {
+        this.pendingRetryDoorOpen = { doorIndex, timestamp: Date.now(), retried: false };
+        if (!cryptoStore.hasValidSession(DOMAIN_VEHICLE_SECURITY)) {
+          this.logPacket('INFO', null, `🔐 VCSEC 보안 세션 핸드셰이크 후 도어(${doorIndex + 1}) 개방을 실행합니다...`);
+          const siReq = buildSessionInfoRequest(cryptoStore.publicKeyRaw, DOMAIN_VEHICLE_SECURITY, cryptoStore.routingAddress);
+          await bleManager.sendPacket(siReq, true);
+          return;
+        }
         const pkt = await buildOpenDoorAction(doorIndex, cryptoStore);
         await bleManager.sendPacket(pkt, true);
       } catch (err) {

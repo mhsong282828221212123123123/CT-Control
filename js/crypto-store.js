@@ -436,8 +436,20 @@ class CryptoStore {
       }
     }
 
+    let epochChanged = false;
     if (sessionInfo.epoch && sessionInfo.epoch.length > 0) {
-      session.epoch = new Uint8Array(sessionInfo.epoch);
+      const newEpoch = new Uint8Array(sessionInfo.epoch);
+      if (!session.epoch || session.epoch.length !== newEpoch.length) {
+        epochChanged = true;
+      } else {
+        for (let i = 0; i < newEpoch.length; i++) {
+          if (session.epoch[i] !== newEpoch[i]) {
+            epochChanged = true;
+            break;
+          }
+        }
+      }
+      session.epoch = newEpoch;
     }
 
     if (typeof sessionInfo.clockTime === 'number' && sessionInfo.clockTime > 0) {
@@ -446,9 +458,9 @@ class CryptoStore {
     }
 
     if (typeof sessionInfo.counter === 'number') {
-      session.counter = Math.max(session.counter, sessionInfo.counter);
-      this.sessionCounter = Math.max(this.sessionCounter, session.counter);
-      await this.updateRecordField('sessionCounter', this.sessionCounter);
+      // 도메인별(VCSEC=2, Infotainment=3) 카운터는 완전히 독립적이어야 하며,
+      // 차량이 SessionInfo로 알려준 counter 값을 해당 도메인의 기준 카운터로 즉시 동기화
+      session.counter = epochChanged ? sessionInfo.counter : Math.max(session.counter, sessionInfo.counter);
     }
 
     session.ready = !!(session.status === 0 && session.aesKey && session.epoch && session.epoch.length > 0);
@@ -739,13 +751,12 @@ class CryptoStore {
     return this.sessionCounter;
   }
 
-  async syncCounter(vehicleReportedCounter) {
-    this.sessionCounter = Math.max(this.sessionCounter, vehicleReportedCounter);
-    if (this.sessions[2]) {
-      this.sessions[2].counter = Math.max(this.sessions[2].counter, vehicleReportedCounter);
+  async syncCounter(vehicleReportedCounter, domain = 2) {
+    const targetDomain = domain || 2;
+    if (this.sessions[targetDomain]) {
+      this.sessions[targetDomain].counter = vehicleReportedCounter;
     }
-    await this.updateRecordField('sessionCounter', this.sessionCounter);
-    return this.sessionCounter;
+    return vehicleReportedCounter;
   }
 
   updateRecordField(field, value) {

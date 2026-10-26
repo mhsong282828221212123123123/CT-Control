@@ -420,11 +420,21 @@ export function buildRoutableAddKeyRequest(publicKeyBytes, routingAddress = null
 
 /**
  * 도어 언래치(물리 개방) 액션 (VCSEC ClosureMoveRequest)
+ * - vcsec.proto 규격: 도어(frontDriverDoor=1, frontPassengerDoor=2, rearDriverDoor=3, rearPassengerDoor=4) 개방은
+ *   반드시 CLOSURE_MOVE_TYPE_OPEN (3) 값을 사용해야 도어 액추에이터(래치)가 작동함
  */
-export async function buildOpenDoorAction(doorIndex, cryptoStore) {
+export async function buildOpenDoorAction(doorIndex, cryptoStore, moveType = CLOSURE_MOVE_TYPE_OPEN) {
   const closureFieldTag = doorIndex + 1; // 1: FL, 2: FR, 3: RL, 4: RR
-  const doorMoveField = encodeVarintField(closureFieldTag, CLOSURE_MOVE_TYPE_MOVE);
+  const doorMoveField = encodeVarintField(closureFieldTag, moveType);
   const unsignedMessage = encodeLengthDelimitedField(4, doorMoveField);
+  return await buildEncryptedRoutableMessage(unsignedMessage, DOMAIN_VEHICLE_SECURITY, cryptoStore);
+}
+
+/**
+ * 차량 도어 잠금 해제 액션 (VCSEC RKE_ACTION_UNLOCK = 0)
+ */
+export async function buildUnlockVehicleAction(cryptoStore) {
+  const unsignedMessage = encodeVarintField(2, RKE_ACTION_UNLOCK);
   return await buildEncryptedRoutableMessage(unsignedMessage, DOMAIN_VEHICLE_SECURITY, cryptoStore);
 }
 
@@ -784,18 +794,17 @@ function parseFromVCSEC(fields, result) {
       for (const cs of cmdStatusFields) {
         if (cs.fieldNumber === 1 && cs.wireType === WIRE_VARINT) {
           opStatus = cs.value;
-          if (opStatus === OPERATIONSTATUS_WAIT) {
-            result.whitelistOperationStatus = 'WAITING_FOR_CARD';
-          } else if (opStatus === OPERATIONSTATUS_ERROR) {
-            result.whitelistOperationStatus = 'ERROR';
-          }
         }
-        // tag 2: signedMessageStatus
+        // tag 2: signedMessageStatus (counter = 1, signedMessageInformation = 2)
         if (cs.fieldNumber === 2 && cs.wireType === WIRE_LENGTH_DELIMITED && cs.data) {
           const smsFields = parseFields(cs.data);
+          result.domain = DOMAIN_VEHICLE_SECURITY;
           for (const sms of smsFields) {
             if (sms.fieldNumber === 1 && sms.wireType === WIRE_VARINT) {
               result.reportedCounter = sms.value;
+            }
+            if (sms.fieldNumber === 2 && sms.wireType === WIRE_VARINT && sms.value !== 0) {
+              result.vcsecSignedMessageFault = sms.value;
             }
           }
         }
@@ -965,17 +974,17 @@ function parseVehicleDataFields(vdFields, telemetry) {
       telemetry.doors = doors;
     }
 
-    // 5. TirePressureState (VehicleData tag 19)
+    // 5. TirePressureState (VehicleData tag 19) -> Bar(float)를 psi로 변환 (1 Bar = 14.5037738 psi)
     if (vf.fieldNumber === 19) {
       const tpFields = parseFields(vf.data);
       const tpms = {};
       for (const tf of tpFields) {
         if (tf.wireType === WIRE_FIXED32 && typeof tf.floatValue === 'number') {
-          const bar = Number(tf.floatValue.toFixed(2));
-          if (tf.fieldNumber === 2) tpms.fl = bar;
-          if (tf.fieldNumber === 3) tpms.fr = bar;
-          if (tf.fieldNumber === 4) tpms.rl = bar;
-          if (tf.fieldNumber === 5) tpms.rr = bar;
+          const psi = Math.round(tf.floatValue * 14.5037738);
+          if (tf.fieldNumber === 2) tpms.fl = psi;
+          if (tf.fieldNumber === 3) tpms.fr = psi;
+          if (tf.fieldNumber === 4) tpms.rl = psi;
+          if (tf.fieldNumber === 5) tpms.rr = psi;
         }
       }
       if (Object.keys(tpms).length > 0) {

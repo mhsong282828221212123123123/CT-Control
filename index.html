@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v13]</title>
-  <link rel="manifest" href="./manifest.json?v=13">
+  <title>CT-Control | Tesla Virtual Key & Sub-Cluster [v14]</title>
+  <link rel="manifest" href="./manifest.json?v=14">
   <meta name="theme-color" content="#0d0d0d">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <script>
-    // [v13 캐시 파쇄] Service Worker 등록 강제 해제 및 Web Cache 강제 소각
+    // [v14 캐시 파쇄] Service Worker 등록 강제 해제 및 Web Cache 강제 소각
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistrations().then(function(regs) {
         for (var i = 0; i < regs.length; i++) {
@@ -23,7 +23,7 @@
       });
     }
   </script>
-  <link rel="stylesheet" href="./style.css?v=13">
+  <link rel="stylesheet" href="./style.css?v=14">
 </head>
 <body>
 
@@ -36,7 +36,7 @@
       <div id="brand-logo" class="brand-logo" title="5초간 길게 누르면 데모 모드 활성화">
         <span>TESLA</span>
         <span class="brand-badge">CT</span>
-        <span id="build-version-badge" class="version-pill">v13</span>
+        <span id="build-version-badge" class="version-pill">v14</span>
       </div>
       <div id="connection-indicator" class="connection-indicator">
         <span class="status-dot">🔴</span>
@@ -341,10 +341,10 @@
         <div class="card">
           <span style="font-size: 13px; font-weight: 700;">타이어 공기압 (TPMS)</span>
           <div class="tpms-grid">
-            <div class="tpms-item"><span>전방 좌측 (FL)</span><div id="tpms-fl" class="tpms-val">-- Bar</div></div>
-            <div class="tpms-item"><span>전방 우측 (FR)</span><div id="tpms-fr" class="tpms-val">-- Bar</div></div>
-            <div class="tpms-item"><span>후방 좌측 (RL)</span><div id="tpms-rl" class="tpms-val">-- Bar</div></div>
-            <div class="tpms-item"><span>후방 우측 (RR)</span><div id="tpms-rr" class="tpms-val">-- Bar</div></div>
+            <div class="tpms-item"><span>전방 좌측 (FL)</span><div id="tpms-fl" class="tpms-val">-- psi</div></div>
+            <div class="tpms-item"><span>전방 우측 (FR)</span><div id="tpms-fr" class="tpms-val">-- psi</div></div>
+            <div class="tpms-item"><span>후방 좌측 (RL)</span><div id="tpms-rl" class="tpms-val">-- psi</div></div>
+            <div class="tpms-item"><span>후방 우측 (RR)</span><div id="tpms-rr" class="tpms-val">-- psi</div></div>
           </div>
         </div>
 
@@ -551,6 +551,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/app.js?v=13"></script>
+  <script type="module" src="./js/app.js?v=14"></script>
 </body>
 </html>
